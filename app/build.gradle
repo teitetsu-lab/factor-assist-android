@@ -1,17 +1,40 @@
 plugins { id 'com.android.application' }
+
+// Release signing key, for the APKs that are published. keystore.properties and the key itself are
+// kept out of the repository (.gitignore); without them the release build falls back to the debug key,
+// which is fine for testing on this PC but must never be distributed.
+def signing = new Properties()
+def signingFile = rootProject.file('keystore.properties')
+if (signingFile.exists()) signingFile.withInputStream { signing.load(it) }
+
 android {
+    signingConfigs {
+        if (signing['storeFile']) {
+            publish {
+                storeFile file(signing['storeFile']); storePassword signing['storePassword']
+                keyAlias signing['keyAlias']; keyPassword signing['keyPassword']
+            }
+        }
+    }
     namespace 'jp.factor.overlay'
     compileSdk 35
     defaultConfig {
         applicationId 'jp.factor.overlay'; minSdk 34; targetSdk 35; versionCode 5; versionName '0.2.2'
+        // Only 64-bit ARM: x86/x86_64 are for emulators, and minSdk 34 leaves no 32-bit ARM devices.
+        // ONNX Runtime and ML Kit ship all four, which would be three quarters of the APK.
+        ndk { abiFilters 'arm64-v8a' }
     }
     buildFeatures { buildConfig true }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     testOptions { unitTests.all { systemProperty 'factor.assets', file('src/main/assets').absolutePath } }
     // Release = the optimised build: a debuggable APK runs the Java image preprocessing several times slower.
-    // Signed with this PC's debug key so it installs over the debug build and keeps presets; no shrinking,
-    // since ONNX Runtime and ML Kit are reached through JNI/reflection.
-    buildTypes { release { signingConfig signingConfigs.debug; minifyEnabled false } }
+    // No shrinking, since ONNX Runtime and ML Kit are reached through JNI/reflection.
+    buildTypes {
+        release {
+            signingConfig signing['storeFile'] ? signingConfigs.publish : signingConfigs.debug
+            minifyEnabled false
+        }
+    }
 }
 dependencies {
     implementation 'com.google.mlkit:text-recognition-japanese:16.0.1'
