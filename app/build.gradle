@@ -19,7 +19,7 @@ android {
     namespace 'jp.factor.overlay'
     compileSdk 35
     defaultConfig {
-        applicationId 'jp.factor.overlay'; minSdk 34; targetSdk 35; versionCode 5; versionName '0.2.2'
+        applicationId 'jp.factor.overlay'; minSdk 34; targetSdk 35; versionCode 6; versionName '0.3.0'
         // Only 64-bit ARM: x86/x86_64 are for emulators, and minSdk 34 leaves no 32-bit ARM devices.
         // ONNX Runtime and ML Kit ship all four, which would be three quarters of the APK.
         ndk { abiFilters 'arm64-v8a' }
