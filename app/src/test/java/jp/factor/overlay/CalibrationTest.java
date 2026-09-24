@@ -13,7 +13,7 @@ public class CalibrationTest {
         }
     }
     @Test public void findsTheTitleBandAboveTheList(){
-        int[] band=Calibration.titleBand(pixels,w,h,FactorVision.detect(pixels,w,h).ys().get(0)-120);
+        int[] band=Calibration.titleBand(pixels,w,h,FactorVision.detectByStars(pixels,w,h).ys().get(0)-120);
         assertNotNull(band);
         assertEquals(376,band[0],6);assertEquals(463,band[1],6);assertEquals(704,band[2],6);assertEquals(512,band[3],6);
     }

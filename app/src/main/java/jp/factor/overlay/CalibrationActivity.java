@@ -47,7 +47,7 @@ public class CalibrationActivity extends Activity {
             Bitmap decoded=ImageDecoder.decodeBitmap(ImageDecoder.createSource(getContentResolver(),data.getData()),(d,info,src)->d.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE));
             Bitmap image=decoded.copy(Bitmap.Config.ARGB_8888,false);
             int w=image.getWidth(),h=image.getHeight();int[] pixels=new int[w*h];image.getPixels(pixels,0,w,0,0,w,h);
-            FactorVision.Layout layout=FactorVision.detect(pixels,w,h);
+            FactorVision.Layout layout=FactorVision.detectByStars(pixels,w,h);
             rows=layout==null?0:layout.ys().size();firstRowY=layout==null?h*3/10:layout.ys().get(0);
             view.show(image,Calibration.current,firstRowY);autoPlace();
         }catch(Exception e){Ui.toast(this,"画像を開けませんでした");}

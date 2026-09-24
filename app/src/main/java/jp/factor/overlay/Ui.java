@@ -43,13 +43,15 @@ final class Ui {
     static void show(AlertDialog d,boolean floating) { if(floating)d.getWindow().setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY); d.show(); }
     /** Asks for a name, creates the preset and selects it, then runs created (from the app or the floating menu). */
     static void newPreset(Context c,boolean floating,Runnable created) {
-        EditText name=new EditText(c);name.setSingleLine();name.setHint("プリセット名");
-        AlertDialog d=new AlertDialog.Builder(c).setTitle("新規プリセット").setView(name).setPositiveButton("作成",null).setNegativeButton("キャンセル",null).create();
+        LinearLayout content=column(c);
+        EditText name=new EditText(c);name.setSingleLine();name.setHint("プリセット名");content.addView(name);
+        Spinner kind=spinner(c,new String[]{"簡易プリセット（必須・重要・必要・本育成）","詳細プリセット（優先度を8段階で設定）"});content.addView(kind);
+        AlertDialog d=new AlertDialog.Builder(c).setTitle("新規プリセット").setView(content).setPositiveButton("作成",null).setNegativeButton("キャンセル",null).create();
         show(d,floating);
-        d.getButton(-1).setOnClickListener(v->{
+        d.getButton(-1).setOnClickListener(v->{try{
             if(name.getText().toString().isBlank()){name.setError("名前を入力してください");return;}
-            Store.save(c,Store.fresh(name.getText().toString().trim()));d.dismiss();created.run();
-        });
+            Store.save(c,Store.fresh(name.getText().toString().trim()).put("detailed",kind.getSelectedItemPosition()==1));d.dismiss();created.run();
+        }catch(Exception e){toast(c,"作成できませんでした");}});
     }
     static void edit(Context c,boolean floating,Runnable changed) {
         JSONObject selected=Store.selected(c); if(selected==null){toast(c,"プリセットを作成・取り込みしてください");return;}
@@ -58,10 +60,21 @@ final class Ui {
         Button rename=button(c,"名前を保存",()->{try{ if(name.getText().toString().isBlank())return;selected.put("name",name.getText().toString());Store.save(c,selected);changed.run();}catch(Exception e){toast(c,e.getMessage());}});content.addView(rename);
         AlertDialog dialog=new AlertDialog.Builder(c).setTitle("プリセット編集").setView(scroll).setNegativeButton("閉じる",(d,w)->changed.run()).create();
         Runnable reopen=()->{dialog.dismiss();changed.run();edit(c,floating,changed);};
+        // Which kind of preset this is: the plain four tiers, or the eight detailed levels. A preset shared
+        // with the PC version stays readable either way, because every entry keeps its tier name.
+        Switch detailed=new Switch(c);detailed.setText("詳細プリセット（優先度を8段階で設定）");detailed.setChecked(Store.detailed(selected));content.addView(detailed);
+        detailed.setOnCheckedChangeListener((v,on)->{try{selected.put("detailed",on);Store.save(c,selected);reopen.run();}catch(Exception e){toast(c,"保存できませんでした");}});
         content.addView(primary(c,"一覧から因子を追加",()->pick(c,floating,selected,reopen)));
         content.addView(button(c,"名前を入力して追加（OR候補など）",()->entry(c,floating,selected,-1,reopen)));
         content.addView(button(c,"このプリセットを書き出す（コピー・共有）",()->exportPreset(c,selected)));
         content.addView(button(c,"このプリセットをQRで書き出す",()->exportQr(c,floating,selected)));
+        content.addView(button(c,"このプリセットを削除",()->{
+            AlertDialog confirm=new AlertDialog.Builder(c).setTitle("プリセットを削除")
+                .setMessage("「"+selected.optString("name")+"」を削除しますか？\n元に戻せません。")
+                .setPositiveButton("削除",(d,w)->{Store.delete(c,selected.optString("id"));dialog.dismiss();changed.run();toast(c,"「"+selected.optString("name")+"」を削除しました");})
+                .setNegativeButton("キャンセル",null).create();
+            show(confirm,floating);
+        }));
         JSONArray entries=selected.optJSONArray("entries");
         for(int i=0;i<entries.length();i++) {
             JSONObject e=entries.optJSONObject(i); final int index=i;
@@ -71,7 +84,7 @@ final class Ui {
             boolean unknown=false;var known=knownFactors(c);
             if(group!=null){for(int n=0;n<group.length();n++)unknown|=!known.contains(Store.normalize(group.optString(n)));}else unknown=!known.contains(Store.normalize(e.optString("factor")));
             if(unknown&&!known.isEmpty())label="⚠ "+label+"（認識できない名前）";
-            content.addView(button(c,label+"\n"+e.optString("tier")+"  ★"+e.optInt("min_star",1),()->entry(c,floating,selected,index,()->{dialog.dismiss();changed.run();edit(c,floating,changed);})));
+            content.addView(button(c,label+"\n"+entryText(selected,e)+"  ★"+e.optInt("min_star",1),()->entry(c,floating,selected,index,()->{dialog.dismiss();changed.run();edit(c,floating,changed);})));
         }
         show(dialog,floating);dialog.getWindow().setLayout(dp(c,340),Math.min(dp(c,560),c.getResources().getDisplayMetrics().heightPixels-dp(c,100)));
     }
@@ -97,7 +110,7 @@ final class Ui {
         Button prev=button(c,"前へ",()->{});Button next=button(c,"次へ",()->{});
         pager.addView(prev,new LinearLayout.LayoutParams(0,-2,1));pager.addView(next,new LinearLayout.LayoutParams(0,-2,1));
         if(parts.size()>1)content.addView(pager);
-        TextView hint=new TextView(c);hint.setTextColor(MUTED);hint.setText(parts.size()>1?"分割QRです。取り込むときは全部の画像を読み込んでください。":"アプリの「QR画像を読み込む」やPC版で取り込めます。");content.addView(hint);
+        TextView hint=new TextView(c);hint.setTextColor(MUTED);hint.setText(parts.size()>1?"分割QRです。取り込むときは全部の画像を読み込んでください。":"アプリの「QR画像を読み込む」で取り込めます。");content.addView(hint);
         Runnable render=()->{
             try{image.setImageBitmap(QrCodes.bitmap(parts.get(page[0]),shown));}catch(Exception e){toast(c,"QRを作れませんでした");}
             label.setText("「"+name+"」 "+(page[0]+1)+" / "+parts.size());prev.setEnabled(page[0]>0);next.setEnabled(page[0]<parts.size()-1);
@@ -144,7 +157,7 @@ final class Ui {
         return catalog;
     }
     static java.util.Set<String> knownFactors(Context c){return catalog(c).known;}
-    static String assetText(Context c,String name)throws java.io.IOException{try(var in=c.getAssets().open(name)){return new String(in.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);}}
+    static String assetText(Context c,String name)throws java.io.IOException{return Modules.text(c,name);}
     static String optionalAsset(Context c,String name){try{return assetText(c,name);}catch(java.io.IOException e){return null;}}
 
     /** Add factors by picking them from the model's list, narrowed by category and a search box; several at once share one tier and star. */
@@ -175,7 +188,7 @@ final class Ui {
         category.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onNothingSelected(AdapterView<?> p){}public void onItemSelected(AdapterView<?> p,View v,int n,long id){filter.run();}});
         list.setOnItemClickListener((p,v,pos,id)->{String n=shown.get(pos);if(!chosen.remove(n))chosen.add(n);list.setItemChecked(pos,chosen.contains(n));counter.run();});
         LinearLayout options=new LinearLayout(c);content.addView(options);
-        Spinner tier=spinner(c,Store.TIERS);options.addView(tier,new LinearLayout.LayoutParams(0,-2,1));
+        Spinner tier=priority(c,preset,0);options.addView(tier,new LinearLayout.LayoutParams(0,-2,1));
         Spinner star=spinner(c,new String[]{"最低 ★1","最低 ★2","最低 ★3"});options.addView(star,new LinearLayout.LayoutParams(0,-2,1));
         CheckBox group=new CheckBox(c);group.setText("選んだ因子を1つのOR候補にまとめる");content.addView(group);
         filter.run();
@@ -183,9 +196,9 @@ final class Ui {
         show(d,floating);d.getWindow().setLayout(dp(c,340),-2);
         d.getButton(-1).setOnClickListener(v->{try{
             if(chosen.isEmpty()){toast(c,"因子を選んでください");return;}
-            String t=tier.getSelectedItem().toString();int minimum=star.getSelectedItemPosition()+1;
-            if(group.isChecked()&&chosen.size()>1){JSONArray names=new JSONArray();for(String n:chosen)names.put(n);entries.put(new JSONObject().put("tier",t).put("min_star",minimum).put("any_of",names));}
-            else for(String n:chosen)entries.put(new JSONObject().put("tier",t).put("min_star",minimum).put("factor",n));
+            int minimum=star.getSelectedItemPosition()+1;
+            if(group.isChecked()&&chosen.size()>1){JSONArray names=new JSONArray();for(String n:chosen)names.put(n);entries.put(ranked(preset,new JSONObject().put("min_star",minimum).put("any_of",names),tier));}
+            else for(String n:chosen)entries.put(ranked(preset,new JSONObject().put("min_star",minimum).put("factor",n),tier));
             Store.save(c,preset);d.dismiss();changed.run();
         }catch(Exception e){toast(c,"追加できませんでした");}});
     }
@@ -194,17 +207,41 @@ final class Ui {
         LinearLayout content=column(c); EditText names=new EditText(c); names.setHint("因子名（OR候補は改行）");
         JSONArray alternatives=old.optJSONArray("any_of"); String value=old.optString("factor");
         if(alternatives!=null){StringBuilder b=new StringBuilder();for(int i=0;i<alternatives.length();i++){if(i>0)b.append('\n');b.append(alternatives.optString(i));}value=b.toString();}
-        names.setText(value);content.addView(names);Spinner tier=spinner(c,Store.TIERS);for(int i=0;i<Store.TIERS.length;i++)if(Store.TIERS[i].equals(old.optString("tier")))tier.setSelection(i);content.addView(tier);
+        names.setText(value);content.addView(names);Spinner tier=priority(c,preset,Store.entryPriority(old));content.addView(tier);
         Spinner star=spinner(c,new String[]{"最低 ★1","最低 ★2","最低 ★3"});star.setSelection(old.optInt("min_star",1)-1);content.addView(star);
         AlertDialog d=new AlertDialog.Builder(c).setTitle(index<0?"因子追加":"因子編集").setView(content).setPositiveButton("保存",null).setNegativeButton("キャンセル",null)
             .setNeutralButton(index<0?null:"削除",(x,w)->{entries.remove(index);Store.save(c,preset);changed.run();}).create();
         show(d,floating);d.getButton(-1).setOnClickListener(v->{try{
             JSONArray list=new JSONArray();for(String s:names.getText().toString().split("\\R"))if(!s.isBlank())list.put(s.trim());
             if(list.length()==0){names.setError("因子名を入力してください");return;}
-            JSONObject e=new JSONObject().put("tier",tier.getSelectedItem().toString()).put("min_star",star.getSelectedItemPosition()+1);
+            JSONObject e=ranked(preset,new JSONObject().put("min_star",star.getSelectedItemPosition()+1),tier);
             if(list.length()==1)e.put("factor",list.getString(0));else e.put("any_of",list);
             if(index<0)entries.put(e);else entries.put(index,e);Store.save(c,preset);d.dismiss();changed.run();
         }catch(Exception e){toast(c,"保存できませんでした");}});
+    }
+    /** The priority chooser: the four tiers, or the eight detailed levels when the detailed mode is on. */
+    static Spinner priority(Context c,JSONObject preset,int current){
+        boolean detailed=Store.detailed(preset);int value=current<0||current>Store.PRIORITY_MAX?0:current;
+        String[] levels=detailed?Store.LEVELS:Store.TIERS;
+        String[] choices=java.util.Arrays.copyOf(levels,levels.length+1);choices[levels.length]=Store.EXCLUDED;
+        Spinner s=spinner(c,choices);
+        s.setSelection(current==Store.BANNED?levels.length:detailed?value:Store.tierOf(value));
+        return s;
+    }
+    /** Writes both the number and the tier it falls in, so the PC version still reads the preset. */
+    static JSONObject ranked(JSONObject preset,JSONObject entry,Spinner chooser) throws JSONException {
+        int levels=Store.detailed(preset)?Store.LEVELS.length:Store.TIERS.length;
+        int chosen=chooser.getSelectedItemPosition();
+        // The last choice is the ban. It still gets the lowest tier, so the PC version reads the preset as before.
+        if(chosen>=levels)return entry.put("tier",Store.TIERS[Store.TIERS.length-1]).put("priority",Store.PRIORITY_MAX).put("ban",true);
+        int value=Store.detailed(preset)?chosen:chosen*Store.PER_TIER;
+        return entry.put("tier",Store.TIERS[Store.tierOf(value)]).put("priority",value);
+    }
+    /** How an entry reads in the preset list: its level, its tier, or that it is excluded. */
+    static String entryText(JSONObject preset,JSONObject entry){
+        int priority=Store.entryPriority(entry);
+        if(priority==Store.BANNED)return Store.EXCLUDED;
+        return Store.detailed(preset)?Store.LEVELS[priority]:entry.optString("tier");
     }
     static Notification notification(Context c,String text,Class<?> service,int id) {
         NotificationManager nm=c.getSystemService(NotificationManager.class);nm.createNotificationChannel(new NotificationChannel("factor","因子アシスト",NotificationManager.IMPORTANCE_LOW));

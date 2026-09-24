@@ -50,7 +50,8 @@ final class Calibration {
      * Pixels are ARGB, width × height.
      */
     static Calibration guess(int[] pixels,int width,int height){
-        FactorVision.Layout layout=FactorVision.detect(pixels,width,height);
+        // The star rows: the proportions below were measured against them, not against the cards.
+        FactorVision.Layout layout=FactorVision.detectByStars(pixels,width,height);
         double tl=DEFAULT.titleLeft,tt=DEFAULT.titleTop,tr=DEFAULT.titleRight,tb=DEFAULT.titleBottom;
         double cl=DEFAULT.chipLeft,cr=DEFAULT.chipRight,ch=DEFAULT.chipHalfHeight;
         if(layout!=null){

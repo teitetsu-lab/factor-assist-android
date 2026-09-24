@@ -51,6 +51,8 @@ final class ShareCode {
         for(int i=0;i<entries.length();i++) {
             JSONObject e=entries.getJSONObject(i);
             if(!Arrays.asList(Store.TIERS).contains(e.getString("tier")) || e.optInt("min_star",1)<1 || e.optInt("min_star",1)>3) throw new IOException("優先度または星数が不正です");
+            // The number is this app's own field; a preset from the PC version simply has none.
+            if(e.has("priority") && (e.optInt("priority",-1)<0 || e.optInt("priority",-1)>Store.PRIORITY_MAX)) throw new IOException("優先度の数値が不正です");
             if(!e.has("factor") && !e.has("any_of")) throw new IOException("因子名がありません");
         }
         return value;

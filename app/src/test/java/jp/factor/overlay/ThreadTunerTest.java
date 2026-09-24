@@ -5,9 +5,9 @@ import java.util.*;
 
 public class ThreadTunerTest {
     @Test public void optionsFollowTheCoreCount(){
-        assertArrayEquals(new int[]{1,2,3,4,5,6,7,8},FactorVision.threadOptions(8));   // Galaxy S25
-        assertArrayEquals(new int[]{1},FactorVision.threadOptions(0));
-        assertEquals(FactorVision.MAX_THREADS,FactorVision.threadOptions(64).length);
+        assertArrayEquals(new int[]{1,2,3,4,5,6,7,8},ModelRunner.threadOptions(8));   // Galaxy S25
+        assertArrayEquals(new int[]{1},ModelRunner.threadOptions(0));
+        assertEquals(ModelRunner.MAX_THREADS,ModelRunner.threadOptions(64).length);
     }
     @Test public void triesEveryOptionThenSettlesOnTheFastest(){
         ThreadTuner tuner=new ThreadTuner(1,2,3,4);double[] cost={9,4,2,5};

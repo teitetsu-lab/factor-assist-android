@@ -35,7 +35,9 @@ public class MainActivity extends Activity {
         // Other phones and tablets: fit where the page title and the chips are from a screenshot.
         content.addView(Ui.iconButton(this,"読み取り位置の調整（S25以外の機種向け）",android.R.drawable.ic_menu_crop,()->startActivity(new Intent(this,CalibrationActivity.class))));
         Ui.section(content,"使用プリセット");
-        JSONArray presets=Store.all(this);String[] labels=new String[presets.length()];JSONObject active=Store.selected(this);int current=0;
+        JSONArray presets=new JSONArray(),stored=Store.all(this);
+        for(int i=0;i<stored.length();i++)if(Store.FACTOR.equals(Store.kindOf(stored.optJSONObject(i))))presets.put(stored.optJSONObject(i));
+        String[] labels=new String[presets.length()];JSONObject active=Store.selected(this);int current=0;
         for(int i=0;i<labels.length;i++){labels[i]=presets.optJSONObject(i).optString("name");if(active!=null&&active.optString("id").equals(presets.optJSONObject(i).optString("id")))current=i;}
         Spinner choice=Ui.spinner(this,labels);choice.setSelection(current);content.addView(choice);
         choice.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){public void onNothingSelected(android.widget.AdapterView<?> p){}public void onItemSelected(android.widget.AdapterView<?> p,android.view.View v,int n,long id){Store.select(MainActivity.this,presets.optJSONObject(n).optString("id"));}});

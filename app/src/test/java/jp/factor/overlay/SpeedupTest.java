@@ -16,16 +16,16 @@ public class SpeedupTest {
 
     @Test public void detectMatchesLegacyAcrossReusedScratch(){
         var expected=LegacyVision.detect(pixels,w,h);assertNotNull(expected);
-        assertEquals(expected,FactorVision.detect(pixels,w,h));
-        assertNull(FactorVision.detect(new int[w*h],w,h));
+        assertEquals(expected,FactorVision.detectByStars(pixels,w,h));
+        assertNull(FactorVision.detectByStars(new int[w*h],w,h));
         // A smaller frame after a larger one reuses the oversized scratch arrays.
         int sw=w/2,sh=h/2;int[] small=new int[sw*sh];for(int y=0;y<sh;y++)System.arraycopy(pixels,y*w,small,y*sw,sw);
-        assertEquals(LegacyVision.detect(small,sw,sh),FactorVision.detect(small,sw,sh));
-        assertEquals(expected,FactorVision.detect(pixels,w,h));
+        assertEquals(LegacyVision.detect(small,sw,sh),FactorVision.detectByStars(small,sw,sh));
+        assertEquals(expected,FactorVision.detectByStars(pixels,w,h));
     }
 
     @Test public void cropsMatchLegacyForEveryRowAndOffset(){
-        var layout=FactorVision.detect(pixels,w,h);int p=layout.pitch(),s=layout.starX();
+        var layout=FactorVision.detectByStars(pixels,w,h);int p=layout.pitch(),s=layout.starX();
         for(int y:layout.ys())for(int k=-1;k<=1;k++){int offset=(int)Math.rint(k*p/68.0);
             // Coordinates written out exactly as the old read() computed them.
             byte[] oldName=LegacyVision.crop(pixels,w,h,Math.max(0,(int)(s-6.18*p)),(int)(y+offset-.279*p),(int)(s-2.15*p),(int)(y+offset+.191*p),168,true);

@@ -7,7 +7,7 @@ import java.util.Map;
 
 public class CaptureResultsTest {
     @Test public void countsIncludeUnconfiguredFactors(){
-        var rules=Map.of("末脚",java.util.List.of(new Store.Rule(0,1)),"地固め",java.util.List.of(new Store.Rule(1,1)),"集中力",java.util.List.of(new Store.Rule(2,1)));
+        var rules=Map.of("末脚",java.util.List.of(new Store.Rule(Store.priorityOf("必須"),1)),"地固め",java.util.List.of(new Store.Rule(Store.priorityOf("重要"),1)),"集中力",java.util.List.of(new Store.Rule(Store.priorityOf("必要"),1)));
         var factors=Map.of("末脚",2,"地固め",1,"集中力",3,"右回り",1,"左回り",2);
         assertEquals("必須 1 / 重要 1 / 必要 1 / 未設定 2",CaptureService.countSummary(factors,rules));
     }
