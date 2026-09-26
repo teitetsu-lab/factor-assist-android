@@ -785,15 +785,18 @@ public class FloatingService extends Service {
         auto.setChecked(prefs.getBoolean("autoMode",true));content.addView(auto);
         auto.setOnCheckedChangeListener((v,on)->prefs.edit().putBoolean("autoMode",on).apply());
         Ui.section(content,"推論");
-        // 自動 measures every thread count and keeps using the fastest; a number pins it. Applied from the next cycle.
+        // Two automatic choices, both measuring every thread count: the one using the least CPU (the default, for
+        // heat) or the fastest. A number pins it. Applied from the next cycle.
         TextView threadsLabel=new TextView(this);threadsLabel.setText("推論スレッド（標準の推論方式のとき）");content.addView(threadsLabel);
-        int[] threadOptions=FactorVision.threadOptions(Runtime.getRuntime().availableProcessors());String[] threadNames=new String[threadOptions.length+1];threadNames[0]="自動（おすすめ）";
-        for(int i=0;i<threadOptions.length;i++)threadNames[i+1]=threadOptions[i]+" スレッド";
+        int[] threadOptions=FactorVision.threadOptions(Runtime.getRuntime().availableProcessors());String[] threadNames=new String[threadOptions.length+2];
+        threadNames[0]="自動・発熱抑制重視（おすすめ）";threadNames[1]="自動・最速重視";
+        for(int i=0;i<threadOptions.length;i++)threadNames[i+2]=threadOptions[i]+" スレッド";
         Spinner threads=Ui.spinner(this,threadNames);int savedThreads=prefs.getInt("inferenceThreads",0);
-        threads.setSelection(savedThreads<=threadOptions.length?savedThreads:0);content.addView(threads);
+        int shown=savedThreads==ThreadTuner.AUTO_FASTEST?1:0;for(int i=0;i<threadOptions.length;i++)if(threadOptions[i]==savedThreads)shown=i+2;
+        threads.setSelection(shown);content.addView(threads);
         threads.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onNothingSelected(AdapterView<?> p){}
             public void onItemSelected(AdapterView<?> p,View v,int n,long id){
-                int chosen=n==0?0:threadOptions[n-1];
+                int chosen=n==0?0:n==1?ThreadTuner.AUTO_FASTEST:threadOptions[n-2];
                 if(chosen==prefs.getInt("inferenceThreads",0))return;   // the spinner fires once by itself
                 prefs.edit().putInt("inferenceThreads",chosen).apply();}});
     }
