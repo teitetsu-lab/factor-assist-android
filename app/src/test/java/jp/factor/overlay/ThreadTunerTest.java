@@ -37,4 +37,10 @@ public class ThreadTunerTest {
         assertEquals(2,tuner.best());
         tuner.setThreads(99);assertNotEquals(-1,tuner.pick());   // an unknown count falls back to automatic
     }
+    @Test public void fewerThreadsWinANearTie(){
+        // 4 threads measure a little faster than 2, but within the noise: 2 keeps fewer cores awake.
+        ThreadTuner tuner=new ThreadTuner(1,2,3,4);double[] cost={9,4.4,6,4};
+        for(int call=0;call<200;call++){int pick=tuner.pick();tuner.record(pick,cost[pick]);}
+        assertEquals(1,tuner.best());
+    }
 }

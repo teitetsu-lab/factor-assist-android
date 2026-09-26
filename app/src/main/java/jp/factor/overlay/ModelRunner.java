@@ -49,6 +49,10 @@ final class ModelRunner implements AutoCloseable {
         try(var options=new OrtSession.SessionOptions()){
             options.setIntraOpNumThreads(threads);
             options.setInterOpNumThreads(1);
+            // ONNX Runtime's workers otherwise spin on the CPU for a while after every run, waiting for more work.
+            // A read here is a few ms of inference then ~30ms of nothing, so that spinning was mostly heat.
+            options.addConfigEntry("session.intra_op.allow_spinning","0");
+            options.addConfigEntry("session.inter_op.allow_spinning","0");
             OrtSession[] made=new OrtSession[models.length];
             try{for(int i=0;i<models.length;i++)made[i]=env.createSession(models[i],options);}
             catch(OrtException e){for(OrtSession s:made)if(s!=null)s.close();throw e;}

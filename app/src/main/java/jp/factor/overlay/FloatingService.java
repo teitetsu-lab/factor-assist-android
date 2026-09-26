@@ -775,10 +775,10 @@ public class FloatingService extends Service {
     /** How hard the app reads the screen, and what it reports about itself. */
     void recognitionSettings(LinearLayout content){
         var prefs=Store.prefs(this);
-        TextView frequency=new TextView(this);frequency.setText("毎秒の認識目標回数");content.addView(frequency);
+        TextView frequency=new TextView(this);frequency.setText("毎秒の文字認識目標回数（枠はこれとは別に画面に合わせて動きます）");content.addView(frequency);
         EditText rate=new EditText(this);rate.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);rate.setSingleLine();
         rate.setText(prefs.getString("recognitionRateText",CaptureService.DEFAULT_RATE));content.addView(rate);
-        content.addView(Ui.button(this,"認識回数を適用",()->{try{String value=CycleLimit.validate(rate.getText().toString());prefs.edit().putString("recognitionRateText",value).apply();Ui.toast(this,"認識回数を保存しました");}catch(Exception e){rate.setError("1以上の整数を入力してください");}}));
+        content.addView(Ui.button(this,"文字認識の回数を適用",()->{try{String value=CycleLimit.validate(rate.getText().toString());prefs.edit().putString("recognitionRateText",value).apply();Ui.toast(this,"認識回数を保存しました");}catch(Exception e){rate.setError("1以上の整数を入力してください");}}));
         Switch showStats=new Switch(this);showStats.setText("処理状況をフローティング表示（回/秒・処理時間など）");showStats.setChecked(prefs.getBoolean("showStats",false));content.addView(showStats);
         showStats.setOnCheckedChangeListener((v,on)->{prefs.edit().putBoolean("showStats",on).apply();refreshStats();});
         Switch auto=new Switch(this);auto.setText("因子画面とスキル取得画面を見分けて、モードを自動で切り替える");

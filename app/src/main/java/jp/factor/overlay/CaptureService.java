@@ -20,7 +20,7 @@ import java.util.concurrent.*;
 import java.util.regex.*;
 
 public class CaptureService extends Service {
-    static final String DEFAULT_RATE="30";
+    static final String DEFAULT_RATE="10";
     /** running: recognising now. connected: the screen share is alive, possibly paused, so resuming needs no consent dialog. */
     static volatile boolean running=false, connected=false;
     static volatile String message="停止中";
@@ -33,10 +33,12 @@ public class CaptureService extends Service {
     static void pause(Context c){c.startService(new Intent(c,CaptureService.class).setAction("PAUSE"));}
     static void resume(Context c){c.startService(new Intent(c,CaptureService.class).setAction("RESUME"));}
     static final CycleStats stats=new CycleStats();
+    /** Frames the screen share delivered: the display sends one only when the screen changes, so this caps the cycles. */
+    static final CycleStats arrivals=new CycleStats();
     static String performance(){
         long at=lastImageAt;
         String share="共有画面："+(contentVisible?"表示中":"非表示")+" / 最後の画面："+(at==0?"まだ無し":String.format(Locale.JAPAN,"%.1f秒前",(SystemClock.elapsedRealtime()-at)/1000.0));
-        return "状態："+message+"\n"+share+"\n"+stats.text(SystemClock.elapsedRealtimeNanos())+"\n"+stageText();
+        return "状態："+message+"\n"+share+"\n"+stats.text(SystemClock.elapsedRealtimeNanos())+"\n"+arrivalText()+"\n"+stageText();
     }
     static final Map<String,Map<String,Integer>> results=new LinkedHashMap<>();
     /** Where each factor sits in its page, so results are listed as in the game (see PagePlaces). */
@@ -170,14 +172,17 @@ public class CaptureService extends Service {
     }
 
     // Per-stage timings. 見出し待ち is only what is left of the ML Kit header OCR after the factor inference finished.
-    static final String[] STAGES={"取得","画素","行検出","因子推論","見出し待ち"};
+    static final String[] STAGES={"取得","画素","行検出","因子推論","見出し待ち","名前確認","そのほか"};
     static final double[] stageMs=new double[STAGES.length];static long headerOcr,headerCached,noRows,noHeader;
     static volatile FactorVision activeVision;static volatile String titleKnown="なし",lastOcrText="";
     /** The models the last cycle ran, and what to call them in the display. */
     static volatile ModelRunner activeRunner;static volatile String activeModels="因子推論";
     static synchronized void resetStages(){Arrays.fill(stageMs,0);headerOcr=0;headerCached=0;noRows=0;noHeader=0;FactorVision v=activeVision;if(v!=null)v.resetCounters();ModelRunner r=activeRunner;if(r!=null)r.resetCounters();}
-    static synchronized void stage(int i,long nanos){double ms=nanos/1e6;stageMs[i]=stageMs[i]==0?ms:stageMs[i]*.9+ms*.1;}
+    /** The stages timed this cycle, so what is left over shows as そのほか (worker only). */
+    private static long cycleStaged;
+    static synchronized void stage(int i,long nanos){cycleStaged+=nanos;double ms=nanos/1e6;stageMs[i]=stageMs[i]==0?ms:stageMs[i]*.9+ms*.1;}
     static synchronized void headerUsed(boolean cached){if(cached)headerCached++;else headerOcr++;}
+    static String arrivalText(){return String.format(Locale.JAPAN,"画面の更新（直近5秒）：%.1f 回/秒",arrivals.rate(SystemClock.elapsedRealtimeNanos(),5));}
     static synchronized String stageText(){
         StringBuilder s=new StringBuilder("段階別（移動平均）");
         for(int i=0;i<STAGES.length;i++)s.append(i%3==0?"\n":" / ").append(STAGES[i]).append(String.format(Locale.JAPAN," %.1fms",stageMs[i]));
@@ -257,7 +262,7 @@ public class CaptureService extends Service {
         // Pausing keeps the projection token; only the frames stop, by detaching the reader surface.
         if(projection==null&&("PAUSE".equals(intent.getAction())||"RESUME".equals(intent.getAction()))){stopSelf();return START_NOT_STICKY;}
         if("PAUSE".equals(intent.getAction())){Log.d("FactorCapture","一時停止");pauseNow();return START_NOT_STICKY;}
-        if("RESUME".equals(intent.getAction())){Log.d("FactorCapture","再開 projection="+(projection!=null)+" paused="+paused+" busy="+busy+" 表示="+contentVisible);if(projection!=null&&paused){paused=false;freshStart=true;stats.reset(SystemClock.elapsedRealtimeNanos());resetStages();running=true;message="認識中";handler.post(()->{if(display!=null&&reader!=null)display.setSurface(reader.getSurface());});}return START_NOT_STICKY;}
+        if("RESUME".equals(intent.getAction())){Log.d("FactorCapture","再開 projection="+(projection!=null)+" paused="+paused+" busy="+busy+" 表示="+contentVisible);if(projection!=null&&paused){paused=false;freshStart=true;stats.reset(SystemClock.elapsedRealtimeNanos());arrivals.reset(SystemClock.elapsedRealtimeNanos());resetStages();running=true;message="認識中";handler.post(()->{if(display!=null&&reader!=null)display.setSurface(reader.getSurface());});}return START_NOT_STICKY;}
         if(projection!=null)return START_NOT_STICKY;
         try {
             startForeground(12,Ui.notification(this,"因子を認識中",CaptureService.class,12));
@@ -272,7 +277,7 @@ public class CaptureService extends Service {
             Rect bounds=getSystemService(WindowManager.class).getMaximumWindowMetrics().getBounds();width=bounds.width();height=bounds.height();
             openReader();display=projection.createVirtualDisplay("FactorCapture",width,height,getResources().getDisplayMetrics().densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,reader.getSurface(),null,handler);
-            stats.reset(SystemClock.elapsedRealtimeNanos());resetStages();connected=true;running=false;paused=true;
+            stats.reset(SystemClock.elapsedRealtimeNanos());arrivals.reset(SystemClock.elapsedRealtimeNanos());resetStages();connected=true;running=false;paused=true;
             // Reading starts at once, unless the settings say to wait for 開始 on the floating bar (認識開始を押したとき):
             // then the game can be set up first without the app reading, and heating the phone, in the meantime.
             // What was granted decides how the frames are drawn (see FactorFrames), whatever the setting says later.
@@ -299,11 +304,13 @@ public class CaptureService extends Service {
         reader.setOnImageAvailableListener(source->{
             Image image;try{image=source.acquireLatestImage();}catch(Exception e){message="画面取得待ち";return;}
             if(image==null)return;
-            lastImageAt=SystemClock.elapsedRealtime();
+            lastImageAt=SystemClock.elapsedRealtime();arrivals.add(SystemClock.elapsedRealtimeNanos(),0);
             if(closed||paused){image.close();return;}
             releaseHeld();held=image;
-            // While the worker is busy with an earlier frame, this one still moves the frames: see followColumn.
-            if(busy)followColumn(image);
+            // A frame that is not read now - the worker is busy, or the next read is not due yet under the reads-a-
+            // second limit - still moves the frames (see followColumn). So they follow the list at the rate the
+            // screen changes, while the full read runs at the rate set.
+            if(busy||!readDue())followColumn(image);
             pump();
         },handler);
     }
@@ -314,8 +321,8 @@ public class CaptureService extends Service {
     /** Capture time of the frame the worker's cycle is reading. */
     private volatile long cycleFrameTime;
     /**
-     * Capture thread only. Moves the frames onto the rows of a frame that arrived while the worker was still busy
-     * with an earlier one. Only the column the cards' edges are found in is read, straight from the image, so this
+     * Capture thread only. Moves the frames onto the rows of a frame that will not be read in full (the worker is
+     * busy, or the next read is not due). Only the column the cards' edges are found in is read, straight from the image, so this
      * costs a couple of thousand pixels: the frames then follow the list at the rate the screen changes rather
      * than at the rate frames are fully read.
      */
@@ -366,6 +373,8 @@ public class CaptureService extends Service {
     void releaseHeld(){if(held!=null){held.close();held=null;}}
     final Runnable pumpTask=this::pump;
     /** Capture thread only. Starts the next cycle on the newest frame, or re-reads the unchanged frame while rows await confirmation. */
+    /** Whether pump would start a read now, as far as the reads-a-second limit goes. */
+    boolean readDue(){return SystemClock.elapsedRealtimeNanos()-last>=CycleLimit.intervalNanos(Store.prefs(this).getString("recognitionRateText",DEFAULT_RATE));}
     void pump(){
         if(closed||paused||busy)return;
         // An adjustable upper bound, not a frame queue or a promised frame rate.
@@ -406,16 +415,18 @@ public class CaptureService extends Service {
             if(!reread)headerAttempt=0;
             if(closed||generation!=resultGeneration)return;
             // After a pause the screen may be anywhere, so half-confirmed rows from before it must not count.
-            if(workerGeneration!=generation||freshStart){workerGeneration=generation;freshStart=false;candidate="";stable=0;confirmations.clear();settle.forget();
+            if(workerGeneration!=generation||freshStart){workerGeneration=generation;freshStart=false;candidate="";stable=0;confirmations.clear();settle.forget();recentNames.clear();
                 // The skill screen's own half-confirmed rows, likewise: after a reset each row needs two fresh reads again.
                 skillHits.clear();skillTop=Integer.MIN_VALUE;}
             // The inference mode can be flipped in the display settings while running, for side-by-side timing.
             int threadSetting=Store.prefs(this).getInt("inferenceThreads",0);
+            stage(0,grabbed);  // every mode, so a skill cycle's grab is not counted as そのほか
             if(skillMode(this)){readSkills(frame,w,h,generation,threadSetting);return;}
-            if(vision==null){vision=new FactorVision(asset("factor.onnx"),asset("factor_rank.onnx"),new String(asset("labels.json"),StandardCharsets.UTF_8));activeVision=vision;resetStages();}
+            if(vision==null){var set=Modules.readSet(this,"factor.onnx","factor_rank.onnx","labels.json");
+                vision=new FactorVision(set.get("factor.onnx"),set.get("factor_rank.onnx"),new String(set.get("labels.json"),StandardCharsets.UTF_8));activeVision=vision;resetStages();}
             vision.runner.tuner.setThreads(threadSetting);
             activeRunner=vision.runner;activeModels="因子推論";
-            stage(0,grabbed);
+
             long t0=SystemClock.elapsedRealtimeNanos();
             // Only the page title and the list are copied out; everything else on screen is never looked at.
             int[] titleBox=TitleMask.box(w,h);
@@ -427,7 +438,7 @@ public class CaptureService extends Service {
             if(layout==null){copyRows(frame,w,0,h);layout=FactorVision.detect(pixels,w,h);}
             if(autoSwitch(w,h,false,cards))return;
             long t2=SystemClock.elapsedRealtimeNanos();stage(2,t2-t1);
-            if(layout==null){frames=null;candidate="";stable=0;confirmations.clear();settle.forget();synchronized(CaptureService.class){noRows++;}return;}
+            if(layout==null){frames=null;candidate="";stable=0;confirmations.clear();settle.forget();recentNames.clear();synchronized(CaptureService.class){noRows++;}return;}
             // Rows of the game are on this frame, so the game is on screen: the frames show again even if the
             // "visible again" callback never came (the app then read on but drew nothing until restarted).
             showContent();
@@ -459,10 +470,10 @@ public class CaptureService extends Service {
             // breaking the two-in-a-row confirmation; a real page change still resets once the next header differs.
             // Frames follow every read row, even when this frame's title was unreadable.
             if(Store.prefs(this).getBoolean("factorFrames",true)){
-                var rules=Store.rules(this);List<FactorFrames.Mark> marks=new ArrayList<>();
+                var rules=presetRules();boolean detailed=presetDetailed;List<FactorFrames.Mark> marks=new ArrayList<>();
                 for(var row:readings)if(row.nameConfidence()>=FactorVision.NAME_MIN&&row.starConfidence()>=FactorVision.STAR_MIN){int priority=Store.priority(rules,row.name(),row.stars());boolean met=priority!=Store.UNMET;
                     int level=met?priority:Store.registered(rules,row.name());
-                    marks.add(new FactorFrames.Mark(row.y(),level,met,null,FactorVision.frameOf(layout,row.y(),w),FactorFrames.WHOLE,FactorFrames.levelTag(level,Store.detailed(this)),null));}
+                    marks.add(new FactorFrames.Mark(row.y(),level,met,null,FactorVision.frameOf(layout,row.y(),w),FactorFrames.WHOLE,FactorFrames.levelTag(level,detailed),null));}
                 publish(new FactorFrames.Snapshot(w,h,marks,0,FactorFrames.letterX(layout,w)));
             }else frames=null;
             if(label.isEmpty()){
@@ -472,7 +483,8 @@ public class CaptureService extends Service {
                 if(!cached&&headerAttempt<HEADER_RETRIES){headerAttempt++;recheck=true;}
                 return;
             }
-            if(label.equals(candidate))stable++;else{candidate=label;stable=1;confirmations.clear();}
+            // Another page: its rows are other factors, even where one sits at the same place and reads the same to the model.
+            if(label.equals(candidate))stable++;else{candidate=label;stable=1;confirmations.clear();recentNames.clear();}
             // Mid swipe the new title is already showing while the previous page's rows are still sliding past.
             // Those rows must not be counted under the new page, so only a frame that matches the previous one counts.
             if(!settle.settled(mask,layout.starX(),layout.pitch())){confirmations.clear();recheck=true;return;}
@@ -498,9 +510,10 @@ public class CaptureService extends Service {
         }catch(Exception e){message="認識エラー："+e.getClass().getSimpleName();}
         finally{
             long end=SystemClock.elapsedRealtimeNanos();stats.add(end,end-started);
+            synchronized(CaptureService.class){long rest=end-started-cycleStaged;cycleStaged=0;stage(STAGES.length-1,Math.max(0,rest));cycleStaged=0;}
             // A header bitmap still being read by an unfinished OCR task is left to the GC.
             if(headerImage!=null&&(pending==null||pending.isComplete()))headerImage.recycle();
-            if(++cycles%50==0)Log.d("FactorCapture",stageText().replace('\n',' '));
+            if(++cycles%50==0)Log.d("FactorCapture",arrivalText()+" 処理 "+String.format(Locale.JAPAN,"%.1f",stats.rate(SystemClock.elapsedRealtimeNanos(),5))+" 回/秒 "+stageText().replace('\n',' '));
             handler.post(()->{busy=false;pump();});
         }
     }
@@ -520,6 +533,30 @@ public class CaptureService extends Service {
     private final Map<Long,String> factorText=new LinkedHashMap<>(){
         @Override protected boolean removeEldestEntry(Map.Entry<Long,String> eldest){return size()>256;}
     };
+    private record RecentName(String name,long at){}
+    static final long RECENT_MS=3000;
+    /** Text readings by roughKey, reused for RECENT_MS. */
+    private final Map<Long,RecentName> recentNames=new LinkedHashMap<>(){
+        @Override protected boolean removeEldestEntry(Map.Entry<Long,RecentName> eldest){return size()>64;}
+    };
+    /**
+     * The model's name, the row's place, the crop's average colour and the rough shape of its text, all coarse
+     * enough that sparkles do not change them. The shape is what tells a look-alike read under the same name
+     * apart: how many pixels stand out from the card's colour in each of 16 columns (dark text on grey cards and
+     * white text on coloured ones alike), counted in steps of 8.
+     */
+    private long roughKey(Bitmap frame,int[] box,FactorVision.Reading row){
+        if(!ptFits(frame,box))return 0;
+        long r=0,g=0,b=0,n=0;
+        for(int y=box[1];y<box[3];y+=4)for(int x=box[0];x<box[2];x+=4){int c=pixelAt(frame,x,y,frameW);r+=(c>>16)&255;g+=(c>>8)&255;b+=c&255;n++;}
+        if(n==0)return 0;
+        long colour=((r/n)>>4)<<8|((g/n)>>4)<<4|((b/n)>>4);
+        int mean=(int)((r*3+g*6+b)/n/10);int[] bands=new int[16];int width=box[2]-box[0];
+        for(int y=box[1];y<box[3];y+=2)for(int x=box[0];x<box[2];x+=2){int c=pixelAt(frame,x,y,frameW);
+            int luma=(((c>>16)&255)*3+((c>>8)&255)*6+(c&255))/10;if(Math.abs(luma-mean)>60)bands[(x-box[0])*16/width]++;}
+        long shape=17;for(int band:bands)shape=shape*31+(band>>3);
+        return (((row.name().hashCode()*31L+row.y()/6)*4099+colour)*1_000_003L+shape)|1;
+    }
     /**
      * The settled rows the model was not certain of, read as text as well (all requests sent first, then collected)
      * and matched against every factor name (see NameMatch). A match replaces the model's name - the case this is
@@ -527,10 +564,29 @@ public class CaptureService extends Service {
      * model's reading alone. A failed OCR is not remembered, so the unchanged crop is read again next time.
      */
     List<FactorVision.Reading> checkFactorNames(Bitmap frame,int w,int h,FactorVision.Layout layout,List<FactorVision.Reading> readings){
-        List<int[]> boxes=new ArrayList<>();
-        for(var row:readings)boxes.add(row.nameConfidence()<FACTOR_CERTAIN?FactorVision.nameBox(layout,row.y()):null);
+        long started=SystemClock.elapsedRealtimeNanos(),now=SystemClock.elapsedRealtime();
+        List<int[]> boxes=new ArrayList<>();long[] rough=new long[readings.size()];
+        String[] read=new String[readings.size()];
+        for(int i=0;i<readings.size();i++){
+            var row=readings.get(i);
+            if(row.nameConfidence()>=FACTOR_CERTAIN){boxes.add(null);continue;}
+            int[] box=FactorVision.nameBox(layout,row.y());
+            // The page's sparkles change a few pixels every frame, so the exact signature below misses on a still
+            // screen and the same rows went to OCR every cycle (about 35ms each). The same model answer at the same
+            // place on the same card colour is taken as the same row for a while.
+            rough[i]=roughKey(frame,box,row);
+            RecentName recent=ptFits(frame,box)?recentNames.get(rough[i]):null;
+            if(recent!=null&&now-recent.at()<RECENT_MS){read[i]=recent.name().isEmpty()?null:recent.name();boxes.add(null);continue;}
+            boxes.add(box);
+        }
         // By every pixel: some factor names are white on coloured cards, which an ink signature would not see.
-        String[] read=namesByText(frame,boxes,factorNames(),factorText,false);
+        String[] byText=namesByText(frame,boxes,factorNames(),factorText,false);
+        for(int i=0;i<byText.length;i++){
+            if(boxes.get(i)==null)continue;
+            read[i]=byText[i];
+            if(rough[i]!=0)recentNames.put(rough[i],new RecentName(byText[i]==null?"":byText[i],now));
+        }
+        stage(5,SystemClock.elapsedRealtimeNanos()-started);
         List<FactorVision.Reading> out=new ArrayList<>(readings.size());
         for(int i=0;i<readings.size();i++){
             var row=readings.get(i);
@@ -549,7 +605,8 @@ public class CaptureService extends Service {
     private final PagePlaces skillPlaces=new PagePlaces();
     void readSkills(Bitmap frame,int w,int h,long generation,int threadSetting) throws Exception {
         // The thread count is found as for the factor models, unless one is fixed in the settings.
-        if(skillVision==null)skillVision=new SkillVision(asset("skill.onnx"),new String(asset("labels.json"),StandardCharsets.UTF_8),threadSetting);
+        if(skillVision==null){var set=Modules.readSet(this,"skill.onnx","labels.json");
+            skillVision=new SkillVision(set.get("skill.onnx"),new String(set.get("labels.json"),StandardCharsets.UTF_8),threadSetting);}
         skillVision.runner.tuner.setThreads(threadSetting);
         activeRunner=skillVision.runner;activeModels="スキル推論";
         long t0=SystemClock.elapsedRealtimeNanos();
@@ -699,7 +756,7 @@ public class CaptureService extends Service {
                 skills.put(skill.name(),new Skill(skill.name(),pt,skill.acquired(),place));
             }
         }
-        message="スキル "+skills.size()+"件"+(ownedPt>0?"／所持 "+ownedPt+"pt":"");
+        message="スキル "+skills.size()+"件"+(ownedPt>=0?"／所持 "+ownedPt+"pt":"");
     }
     /**
      * The rows of the last skill frame whose name was known - read surely, or carried over - by where they were.

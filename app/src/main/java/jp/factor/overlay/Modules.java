@@ -47,6 +47,24 @@ final class Modules {
         try(var in=c.getAssets().open(asset)){return in.readAllBytes();}
     }
     /**
+     * Several files that must come from the same set - a model and the labels.json that numbers its outputs. Read
+     * one by one, an update finishing between two reads paired the old model with the new labels; here the set
+     * is chosen once and its zip opened once for all of them.
+     */
+    static Map<String,byte[]> readSet(Context c,String... assets) throws IOException {
+        Map<String,byte[]> out=new HashMap<>();
+        File dir=usable(c);
+        if(dir!=null)try(ZipFile file=new ZipFile(new File(dir,ZIP))){
+            for(String asset:assets){
+                String path=FILES.get(asset);var entry=path==null?null:file.getEntry(path);
+                if(entry!=null)try(var in=file.getInputStream(entry)){out.put(asset,in.readAllBytes());}
+            }
+        }catch(IOException e){out.clear();}  // gone or replaced under us: the bundled set, whole
+        for(String asset:assets)if(!out.containsKey(asset))
+            try(var in=c.getAssets().open(asset)){out.put(asset,in.readAllBytes());}
+        return out;
+    }
+    /**
      * The folder whose modules.zip is used: the downloaded one, else the backup of the one before it, else null
      * for the set bundled in the APK. A zip counts only with its version_info.json beside it and every model and
      * the labels inside, and each set is used whole, so a model never pairs with another set's labels.

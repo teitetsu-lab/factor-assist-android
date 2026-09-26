@@ -146,13 +146,46 @@ final class FactorVision implements AutoCloseable {
     // Pillow-compatible bilinear downsampling uses a widened triangle filter.
     static byte[] crop(int[] pixels,int width,int height,int left,int top,int right,int bottom,int outWidth,boolean debadge) {
         if(left<0||top<0||right>width||bottom>height||right<=left||bottom<=top)return null;
-        int cw=right-left,ch=bottom-top;int[] local=new int[cw*ch];
+        int cw=right-left,ch=bottom-top;int[] local=work(0,cw*ch);
         for(int y=0;y<ch;y++)System.arraycopy(pixels,(top+y)*width+left,local,y*cw,cw);
         if(debadge)debadge(local,cw,ch);
-        byte[] output=new byte[outWidth*16*3];int[] horizontal=new int[ch*outWidth*3];double sx=cw/(double)outWidth,sy=ch/16.0,fx=Math.max(1,sx),fy=Math.max(1,sy);
-        // Per-channel sums in locals, same arithmetic order as before, without an array per output pixel.
-        for(int y=0;y<ch;y++)for(int x=0;x<outWidth;x++){double center=(x+.5)*sx;int a=Math.max(0,(int)(center-fx+.5)),b=Math.min(cw,(int)(center+fx+.5));double sum=0,c0=0,c1=0,c2=0;for(int k=a;k<b;k++){double weight=Math.max(0,1-Math.abs((k+.5-center)/fx));sum+=weight;int p=local[y*cw+k];c0+=weight*(p&255);c1+=weight*((p>>8)&255);c2+=weight*((p>>16)&255);}int o=(y*outWidth+x)*3;horizontal[o]=(int)Math.round(c0/sum);horizontal[o+1]=(int)Math.round(c1/sum);horizontal[o+2]=(int)Math.round(c2/sum);}
-        for(int y=0;y<16;y++)for(int x=0;x<outWidth;x++){double center=(y+.5)*sy;int a=Math.max(0,(int)(center-fy+.5)),b=Math.min(ch,(int)(center+fy+.5));double sum=0,c0=0,c1=0,c2=0;for(int k=a;k<b;k++){double weight=Math.max(0,1-Math.abs((k+.5-center)/fy));sum+=weight;int i=(k*outWidth+x)*3;c0+=weight*horizontal[i];c1+=weight*horizontal[i+1];c2+=weight*horizontal[i+2];}int o=(y*outWidth+x)*3;output[o]=(byte)Math.round(c0/sum);output[o+1]=(byte)Math.round(c1/sum);output[o+2]=(byte)Math.round(c2/sum);}
+        return resize(local,cw,ch,outWidth);
+    }
+    /**
+     * The filter's taps, worked out once per output column or row instead of once per pixel: the same weights,
+     * summed in the same order, so the result is bit for bit what the per-pixel loops below gave (SpeedupTest).
+     */
+    private record Taps(int[] from,double[][] weights,double[] sums) {}
+    /**
+     * Per thread: the taps by input and output size (the crops come in a handful of sizes), and two work arrays
+     * grown as needed. Fresh ones on every crop were a few MB of garbage a cycle. Only the returned bytes are new,
+     * as the inference cache keeps them.
+     */
+    private static final ThreadLocal<Map<Long,Taps>> TAPS=ThreadLocal.withInitial(()->new LinkedHashMap<>(16,.75f,true){
+        @Override protected boolean removeEldestEntry(Map.Entry<Long,Taps> eldest){return size()>64;}
+    });
+    private static final ThreadLocal<int[][]> WORK=ThreadLocal.withInitial(()->new int[2][0]);
+    private static int[] work(int which,int size){int[][] work=WORK.get();if(work[which].length<size)work[which]=new int[size];return work[which];}
+    private static Taps taps(int in,int out,double scale,double support){
+        int[] from=new int[out];double[][] weights=new double[out][];double[] sums=new double[out];
+        for(int x=0;x<out;x++){double center=(x+.5)*scale;int a=Math.max(0,(int)(center-support+.5)),b=Math.min(in,(int)(center+support+.5));
+            from[x]=a;double[] w=new double[Math.max(0,b-a)];double sum=0;
+            for(int k=a;k<b;k++){double weight=Math.max(0,1-Math.abs((k+.5-center)/support));w[k-a]=weight;sum+=weight;}
+            weights[x]=w;sums[x]=sum;}
+        return new Taps(from,weights,sums);
+    }
+    static byte[] resize(int[] local,int cw,int ch,int outWidth){
+        byte[] output=new byte[outWidth*16*3];int[] horizontal=work(1,ch*outWidth*3);double sx=cw/(double)outWidth,sy=ch/16.0,fx=Math.max(1,sx),fy=Math.max(1,sy);
+        Map<Long,Taps> known=TAPS.get();
+        Taps across=known.computeIfAbsent((long)cw<<32|outWidth,k->taps(cw,outWidth,sx,fx)),down=known.computeIfAbsent(-((long)ch<<32|16),k->taps(ch,16,sy,fy));
+        for(int y=0;y<ch;y++){int row=y*cw;
+            for(int x=0;x<outWidth;x++){int a=across.from()[x];double[] w=across.weights()[x];double c0=0,c1=0,c2=0;
+                for(int t=0;t<w.length;t++){double weight=w[t];int p=local[row+a+t];c0+=weight*(p&255);c1+=weight*((p>>8)&255);c2+=weight*((p>>16)&255);}
+                double sum=across.sums()[x];int o=(y*outWidth+x)*3;horizontal[o]=(int)Math.round(c0/sum);horizontal[o+1]=(int)Math.round(c1/sum);horizontal[o+2]=(int)Math.round(c2/sum);}}
+        for(int y=0;y<16;y++){int a=down.from()[y];double[] w=down.weights()[y];double sum=down.sums()[y];
+            for(int x=0;x<outWidth;x++){double c0=0,c1=0,c2=0;
+                for(int t=0;t<w.length;t++){double weight=w[t];int i=((a+t)*outWidth+x)*3;c0+=weight*horizontal[i];c1+=weight*horizontal[i+1];c2+=weight*horizontal[i+2];}
+                int o=(y*outWidth+x)*3;output[o]=(byte)Math.round(c0/sum);output[o+1]=(byte)Math.round(c1/sum);output[o+2]=(byte)Math.round(c2/sum);}}
         return output;
     }
     /** Confidence a row needs before CaptureService accepts it; rows below get the ±1 offset retries. */
@@ -197,21 +230,21 @@ final class FactorVision implements AutoCloseable {
      */
     List<Reading> readCards(int[] pixels,int width,int height,Layout layout) throws Exception {
         List<Reading> result=new ArrayList<>();
-        List<CardList.Card> cards=new ArrayList<>();List<byte[]> nc=new ArrayList<>(),sc=new ArrayList<>();
+        List<CardList.Card> cards=new ArrayList<>();List<byte[]> nc=new ArrayList<>();
         int p=layout.pitch();
         for(CardList.Card card:layout.cards()){
             int[] name=nameOf(card),rank=rankBox(card.x(STAR_COLUMN),p,card.centre(),0);
             if(!inside(name,width,height)||!inside(rank,width,height))continue;
-            cards.add(card);nc.add(nameCrop(pixels,width,height,name));sc.add(rankCrop(pixels,width,height,rank));
+            cards.add(card);nc.add(nameCrop(pixels,width,height,name));
         }
         if(cards.isEmpty())return result;
         rows+=cards.size();
-        var nr=runner.infer(NAME_MODEL,nc);var sr=runner.infer(RANK_MODEL,sc);
+        // The star model no longer runs here: the colour count is what is used, and the model was only compared
+        // with it for the log, at the cost of a crop and an inference per card on every cycle.
+        var nr=runner.infer(NAME_MODEL,nc);
         for(int i=0;i<cards.size();i++){
             CardList.Card card=cards.get(i);int[] counted=stars(pixels,width,height,card);
             String name=labels.getString((int)nr.indices()[i]);
-            int byModel=Integer.parseInt(stars.getString((int)sr.indices()[i]));
-            if(counted[1]==1&&byModel!=counted[0])lastStarDisagreement=name+" 色で★"+counted[0]+" / モデル★"+byModel+String.format(Locale.JAPAN,"(%.2f)",sr.confidence()[i]);
             // A clear colour count is certain; a blurred one (mid animation) is not taken at all.
             result.add(new Reading(name,counted[0],nr.confidence()[i],counted[1]==1?1f:0f,card.centre()));
         }

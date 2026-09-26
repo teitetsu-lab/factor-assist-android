@@ -33,7 +33,19 @@ final class ThreadTuner {
     }
     /** Time per crop measured with option i; ignored when nothing was inferred. */
     synchronized void record(int i,double ms){if(ms<=0)return;msPerCrop[i]=msPerCrop[i]==0?ms:msPerCrop[i]*(1-SMOOTHING)+ms*SMOOTHING;}
-    synchronized int best(){int best=0;for(int i=1;i<msPerCrop.length;i++)if(msPerCrop[i]>0&&(msPerCrop[best]==0||msPerCrop[i]<msPerCrop[best]))best=i;return best;}
+    /** An option this much slower than the fastest still counts as fast enough, so fewer threads win a near tie. */
+    static final double NEAR=1.15;
+    /**
+     * The fewest threads within NEAR of the fastest time. More threads keep more cores awake for a gain that is
+     * often within the noise (on the S25 1 to 8 threads measured 0.4-0.8ms a crop), and that is heat.
+     */
+    synchronized int best(){
+        int fastest=-1;for(int i=0;i<msPerCrop.length;i++)if(msPerCrop[i]>0&&(fastest<0||msPerCrop[i]<msPerCrop[fastest]))fastest=i;
+        if(fastest<0)return 0;
+        double limit=msPerCrop[fastest]*NEAR;int best=fastest;
+        for(int i=0;i<msPerCrop.length;i++)if(msPerCrop[i]>0&&msPerCrop[i]<=limit&&threads[i]<threads[best])best=i;
+        return best;
+    }
     synchronized String text() {
         StringBuilder s=new StringBuilder("推論スレッド：").append(fixed>=0?"固定 "+threads[fixed]:"自動 → "+threads[best()]+" を使用").append("\n");
         for(int i=0;i<threads.length;i++)s.append(i==0?"":i%4==0?"\n":" / ").append(threads[i]).append(msPerCrop[i]==0?": 未計測":String.format(Locale.JAPAN,": %.2fms/枚",msPerCrop[i]));
