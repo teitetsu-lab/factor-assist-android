@@ -9,7 +9,8 @@ import java.util.*;
  * the phone, shared by both lists:
  *   - identical crops reuse the stored output (InferenceCache), so a still screen costs almost no inference;
  *   - one session per thread count, 1 up to the core count, created on first use, and ThreadTuner keeps using the
- *     fastest (it moves with what the game is doing and with heat); or XNNPACK, when asked for and available;
+ *     fastest (it moves with what the game is doing and with heat). XNNPACK was tried and dropped: measured on the
+ *     phone it was about twice as slow for these small models, and slower still with more threads;
  *   - each read is timed, split into the model itself and the cropping and resizing around it.
  *
  * A read is begin(), any number of infer() calls, then end(). Recognition thread only, except the figures read
@@ -25,10 +26,7 @@ final class ModelRunner implements AutoCloseable {
     private final InferenceCache[] caches;
     /** sessions[option][model]; an option's sessions are made the first time it is picked. */
     private final OrtSession[][] sessions;
-    /** Null with XNNPACK, which manages its own threads. */
     final ThreadTuner tuner;
-    /** requestedXnnpack is what the caller asked for; xnnpack is whether the XNNPACK provider actually loaded. */
-    final boolean requestedXnnpack, xnnpack;
     volatile long inferred, reused;
     volatile double modelMsAvg, prepMsAvg;
     private int option;private long readStarted,modelNanos;private int modelCrops;
@@ -38,24 +36,18 @@ final class ModelRunner implements AutoCloseable {
     static int[] threadOptions(int cores){int n=Math.max(1,Math.min(MAX_THREADS,cores));int[] options=new int[n];for(int i=0;i<n;i++)options[i]=i+1;return options;}
 
     /** widths[i] is the crop width models[i] takes. */
-    ModelRunner(boolean useXnnpack,int[] widths,byte[]... models) throws OrtException {
+    ModelRunner(int[] widths,byte[]... models) throws OrtException {
         this.models=models;this.widths=widths.clone();
         caches=new InferenceCache[models.length];for(int i=0;i<models.length;i++)caches[i]=new InferenceCache(512);
-        OrtSession[] withXnnpack=null;
-        if(useXnnpack)try{withXnnpack=sessions(true,1);}catch(Exception|LinkageError e){withXnnpack=null;}
-        xnnpack=withXnnpack!=null;requestedXnnpack=useXnnpack;
-        if(xnnpack){sessions=new OrtSession[][]{withXnnpack};tuner=null;return;}
         int[] options=threadOptions(Runtime.getRuntime().availableProcessors());
         sessions=new OrtSession[options.length][];
         // The first option is built now, so a broken model still fails here rather than mid recognition.
-        sessions[0]=sessions(false,options[0]);
+        sessions[0]=sessions(options[0]);
         tuner=new ThreadTuner(options);
     }
-    private OrtSession[] sessions(boolean useXnnpack,int threads) throws OrtException {
+    private OrtSession[] sessions(int threads) throws OrtException {
         try(var options=new OrtSession.SessionOptions()){
-            // With XNNPACK the provider owns the worker threads; ORT's own pool stays at one and does not spin.
-            if(useXnnpack){options.addXnnpack(Map.of("intra_op_num_threads","4"));options.setIntraOpNumThreads(1);options.addConfigEntry("session.intra_op.allow_spinning","0");}
-            else options.setIntraOpNumThreads(threads);
+            options.setIntraOpNumThreads(threads);
             options.setInterOpNumThreads(1);
             OrtSession[] made=new OrtSession[models.length];
             try{for(int i=0;i<models.length;i++)made[i]=env.createSession(models[i],options);}
@@ -67,8 +59,8 @@ final class ModelRunner implements AutoCloseable {
     /** Starts one read: picks the thread count to use for it. */
     void begin() throws OrtException {
         readStarted=System.nanoTime();modelNanos=0;modelCrops=0;
-        option=tuner==null?0:tuner.pick();
-        if(sessions[option]==null)sessions[option]=sessions(false,tuner.threads[option]);
+        option=tuner.pick();
+        if(sessions[option]==null)sessions[option]=sessions(tuner.threads[option]);
     }
     /** The outputs of model for these crops; crops seen before reuse the stored output. */
     Predictions infer(int model,List<byte[]> crops) throws Exception {
@@ -91,7 +83,7 @@ final class ModelRunner implements AutoCloseable {
     }
     /** Ends the read: the tuner learns this thread count's speed, and the model/preparation split is updated. */
     void end(){
-        if(tuner!=null&&modelCrops>0)tuner.record(option,modelNanos/1e6/modelCrops);
+        if(modelCrops>0)tuner.record(option,modelNanos/1e6/modelCrops);
         double modelMs=modelNanos/1e6,prepMs=(System.nanoTime()-readStarted)/1e6-modelMs;
         modelMsAvg=modelMsAvg==0?modelMs:modelMsAvg*.9+modelMs*.1;prepMsAvg=prepMsAvg==0?prepMs:prepMsAvg*.9+prepMs*.1;
     }
@@ -107,7 +99,6 @@ final class ModelRunner implements AutoCloseable {
 
     void resetCounters(){inferred=0;reused=0;}
     String splitText(String what){return String.format(Locale.JAPAN,"%sの内訳：前処理 %.1fms / モデル %.1fms",what,prepMsAvg,modelMsAvg);}
-    String threadText(){return xnnpack?"推論スレッド：XNNPACK が管理":tuner.text();}
-    String modeText(){return xnnpack?"XNNPACK":requestedXnnpack?"標準（XNNPACKは使用不可）":"標準";}
+    String threadText(){return tuner.text();}
     @Override public void close(){for(OrtSession[] group:sessions)if(group!=null)for(OrtSession s:group)if(s!=null)try{s.close();}catch(Exception ignored){}}
 }

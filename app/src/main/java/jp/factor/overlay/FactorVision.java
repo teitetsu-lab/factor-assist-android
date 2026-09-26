@@ -82,10 +82,9 @@ final class FactorVision implements AutoCloseable {
     volatile long rows, retriedRows;
     void resetCounters(){runner.resetCounters();rows=0;retriedRows=0;}
 
-    FactorVision(byte[] nameModel, byte[] starModel, String labelJson) throws Exception {this(nameModel,starModel,labelJson,false);}
-    FactorVision(byte[] nameModel, byte[] starModel, String labelJson, boolean useXnnpack) throws Exception {
+    FactorVision(byte[] nameModel, byte[] starModel, String labelJson) throws Exception {
         JSONObject data=new JSONObject(labelJson); labels=data.getJSONArray("factor.name");stars=data.getJSONArray("factor_rank.name");
-        runner=new ModelRunner(useXnnpack,new int[]{168,52},nameModel,starModel);
+        runner=new ModelRunner(new int[]{168,52},nameModel,starModel);
     }
     static int[] threadOptions(int cores){return ModelRunner.threadOptions(cores);}
     static boolean gold(int color) {

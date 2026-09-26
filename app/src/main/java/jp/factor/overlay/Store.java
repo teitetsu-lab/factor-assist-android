@@ -37,7 +37,7 @@ final class Store {
         catch (Exception e) { return new JSONArray(); }
     }
     /** What a preset lists: factors. */
-    static final String FACTOR = "factor";
+    static final String FACTOR = "factor", SKILL = "skill";
     static String kindOf(JSONObject preset) { return FACTOR; }
     static String key(String kind) { return "selected"; }
     static JSONObject selected(Context c) { return selected(c, FACTOR); }

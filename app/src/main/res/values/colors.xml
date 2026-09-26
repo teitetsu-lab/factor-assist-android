@@ -1,0 +1,5 @@
+<resources>
+    <color name="page">#F2F4F3</color>
+    <color name="accent">#087F78</color>
+    <bool name="light_bars">true</bool>
+</resources>

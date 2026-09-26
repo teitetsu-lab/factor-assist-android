@@ -9,27 +9,92 @@ import android.widget.*;
 import org.json.*;
 
 public class FloatingService extends Service {
-    WindowManager wm; LinearLayout bar, menu; ScrollView menuScroll; TextView summary,stats;WindowManager.LayoutParams statsParams;FactorFrames.Overlay frames; Button toggle;
+    WindowManager wm; LinearLayout bar, menu; ScrollView menuScroll; TextView summary,stats;WindowManager.LayoutParams statsParams;FactorFrames.Overlay frames; LinearLayout row;View barGrip;boolean barOpen,edgeRight,edgeStyle;
     WindowManager.LayoutParams barParams, summaryParams;
     Handler handler=new Handler(); boolean expanded=false;
     AlertDialog details;LinearLayout detailTabs,detailBody;String detailLabel="元因子",detailSignature="";
-    Runnable ticker=new Runnable(){public void run(){if(toggle!=null)toggle.setText(CaptureService.running?"停止":"開始");if(summary!=null)updateSummary(true);if(details!=null&&details.isShowing())renderDetails();if(stats!=null)stats.setText(CaptureService.performance());handler.postDelayed(this,500);}};
+    Runnable ticker=new Runnable(){public void run(){showToggle();if(summary!=null)updateSummary(true);if(details!=null&&details.isShowing())renderDetails();if(stats!=null)stats.setText(CaptureService.performance());handler.postDelayed(this,500);}};
+    /** The running state the bar was last built for: ▶ 開始 and ■ 停止 swap by rebuilding it. */
+    Boolean barShows;
+    void showToggle(){if(row!=null&&!Boolean.valueOf(CaptureService.running).equals(barShows))rebuildBar();}
+    /**
+     * (Re)builds the ☰ and 開始/停止 in the shape chosen in the app's settings (see FloatingBar), and hooks up the
+     * dragging and the taps. The ball and the edge handle show the ☰ and 開始/停止 only while opened.
+     */
+    void rebuildBar(){
+        if(row==null)return;boolean running=CaptureService.running;barShows=running;
+        String style=FloatingBar.style(this);edgeStyle="edge".equals(style);
+        row.removeAllViews();
+        Rect screen=wm.getMaximumWindowMetrics().getBounds();
+        // The ball opens away from the nearer side, so what comes out stays on screen.
+        boolean onRight=edgeStyle?edgeRight:"ball".equals(style)&&barParams!=null&&barParams.x+barAX>screen.width()/2;
+        var built=FloatingBar.build(this,style,FloatingBar.opening(this,style),FloatingBar.color(this),FloatingBar.opacity(this),FloatingBar.size(this),
+            running,barOpen||expanded,onRight,barStatus(running),
+            ()->{expanded=!expanded;buildMenu();},this::toggleReading,
+            ()->{barOpen=!barOpen;if(!barOpen&&expanded){expanded=false;buildMenu();}else rebuildBar();});
+        row.addView(built.view());barGrip=built.grip();
+        ((LinearLayout.LayoutParams)row.getLayoutParams()).gravity=onRight?Gravity.END:Gravity.START;
+        // The ball or the handle stays where it is while what it opens grows around it.
+        int ax=built.anchorX(),ay=built.anchorY();
+        if(expanded&&onRight){built.view().measure(View.MeasureSpec.UNSPECIFIED,View.MeasureSpec.UNSPECIFIED);ax+=Ui.dp(this,280)-built.view().getMeasuredWidth();}
+        if(barParams!=null){barParams.x+=barAX-ax;barParams.y+=barAY-ay;}
+        barAX=ax;barAY=ay;barRestX=built.restX();barRestY=built.restY();
+        if(barParams!=null){drag(barGrip,bar,barParams,"bar",true);fitBar();}
+    }
+    /** Where the ball or the handle is in the bar now and when closed (see FloatingBar.Built). */
+    int barAX,barAY,barRestX,barRestY;
+    /** The line at the top of the edge's wide drawer: reading or not, and the preset in use. */
+    CharSequence barStatus(boolean running){
+        String name="";try{name=Store.selected(this).optString("name");}catch(RuntimeException e){}
+        var s=new android.text.SpannableStringBuilder("● "+(running?"認識中":"停止中")+(name.isEmpty()?"":"　"+name));
+        s.setSpan(new android.text.style.ForegroundColorSpan(running?FloatingBar.STOP:FloatingBar.GO),0,1,android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return s;
+    }
+    /** 停止 only pauses: the screen share stays connected so the next 開始 skips the consent dialog. */
+    void toggleReading(){
+        if(CaptureService.running)CaptureService.pause(this);
+        // No game launch here: the button sits over the game, and relaunching a foreground Unity app can freeze its rendering.
+        else if(CaptureService.connected)CaptureService.resume(this);
+        else startActivity(new Intent(this,MainActivity.class).putExtra("capture",true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    }
+    /** The bar is the size of what it shows (the menu's width while open), and an edge handle sits against its edge. */
+    void fitBar(){
+        barParams.width=expanded?Ui.dp(this,280):WindowManager.LayoutParams.WRAP_CONTENT;
+        if(edgeStyle){
+            Rect b=wm.getMaximumWindowMetrics().getBounds();
+            bar.measure(View.MeasureSpec.makeMeasureSpec(b.width(),View.MeasureSpec.AT_MOST),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
+            int w=expanded?barParams.width:bar.getMeasuredWidth();barParams.x=edgeRight?b.width()-w:0;
+        }
+        if(bar.getParent()!=null)wm.updateViewLayout(bar,barParams);
+    }
+    /** The shape, colour or opacity changed in the app's settings: the bar follows at once. */
+    final SharedPreferences.OnSharedPreferenceChangeListener barSettings=(prefs,key)->{
+        if("barStyle".equals(key)||"capsuleColor".equals(key)||"capsuleOpacity".equals(key)||"barScale".equals(key)||"ballOpen".equals(key)||"edgeOpen".equals(key))handler.post(this::rebuildBar);
+    };
+    /** Whether the floating window is up: the settings restart it when the theme changes. */
+    static volatile boolean shown;
     @Override public IBinder onBind(Intent i){return null;}
-    @Override public void onCreate(){super.onCreate();startForeground(11,Ui.notification(this,"フローティング操作",FloatingService.class,11));wm=getSystemService(WindowManager.class);bar=Ui.column(this);bar.setPadding(0,0,0,0);
+    /** What is drawn over the game follows the app's theme too, unless that is switched off (see Ui.themed). */
+    @Override protected void attachBaseContext(Context base){super.attachBaseContext(Ui.themed(base,true));}
+    @Override public void onCreate(){super.onCreate();setTheme(R.style.AppTheme);Ui.palette(this);startForeground(11,Ui.notification(this,"フローティング操作",FloatingService.class,11));shown=true;wm=getSystemService(WindowManager.class);bar=Ui.column(this);bar.setPadding(0,0,0,0);
         // Only the expanded menu has a background; the control bar stays transparent.
         bar.setBackgroundColor(Color.TRANSPARENT);
-        LinearLayout row=new LinearLayout(this);bar.addView(row);
-        Button burger=Ui.button(this,"☰",()->{expanded=!expanded;buildMenu();});row.addView(burger,new LinearLayout.LayoutParams(Ui.dp(this,52),Ui.dp(this,48)));
-        // 停止 only pauses: the screen share stays connected so the next 開始 skips the consent dialog.
-        toggle=Ui.button(this,"開始",()->{
-            if(CaptureService.running)CaptureService.pause(this);
-            // No game launch here: the button sits over the game, and relaunching a foreground Unity app can freeze its rendering.
-            else if(CaptureService.connected)CaptureService.resume(this);
-            else startActivity(new Intent(this,MainActivity.class).putExtra("capture",true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-        });row.addView(toggle,new LinearLayout.LayoutParams(Ui.dp(this,76),Ui.dp(this,48)));
+        row=new LinearLayout(this);bar.addView(row);
+        edgeRight=Store.prefs(this).getBoolean("edgeRight",false);
+        rebuildBar();Store.prefs(this).registerOnSharedPreferenceChangeListener(barSettings);
+        // The mode switched by itself: the menu and the results follow, and the switch is said on screen.
+        CaptureService.modeSwitched=()->handler.post(()->{buildMenu();refreshSummary();refreshFrames();bubble(CaptureService.skillMode(this)?"スキルモード":"因子モード");});
         // The frames go in first, so every other window - the bar, its menu, the results, the dialogs - sits above them.
         refreshFrames();
-        barParams=params("bar",128);wm.addView(bar,barParams);drag(burger,bar,barParams,"bar",true);buildMenu();refreshSummary();refreshStats();handler.post(ticker);
+        barParams=params("bar",128);
+        // A tap anywhere else - on the game - folds the opened ball, handle or menu back up.
+        barParams.flags|=WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
+        bar.setOnTouchListener((v,e)->{
+            if(e.getAction()!=MotionEvent.ACTION_OUTSIDE)return false;
+            if(!(barOpen||expanded))return false;
+            barOpen=false;if(expanded){expanded=false;buildMenu();}else rebuildBar();return true;
+        });
+        wm.addView(bar,barParams);drag(barGrip,bar,barParams,"bar",true);buildMenu();refreshSummary();refreshStats();handler.post(ticker);
     }
     WindowManager.LayoutParams params(String key,int width){var p=new WindowManager.LayoutParams(Ui.dp(this,width),-2,WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT);p.gravity=Gravity.TOP|Gravity.LEFT;p.x=Store.prefs(this).getInt(key+"X",0);p.y=Store.prefs(this).getInt(key+"Y",Ui.dp(this,key.equals("bar")?120:key.equals("stats")?420:220));return p;}
     /**
@@ -37,6 +102,8 @@ public class FloatingService extends Service {
      * recognised here too - the view's own long-click listener never sees anything.
      */
     void drag(View grip,View window,WindowManager.LayoutParams p,String key,boolean click){drag(grip,window,p,key,click,null);}
+    /** The bar's position is saved as where it sits closed, so it comes back there however it was left open. */
+    int restShift(String key,boolean x){return !key.equals("bar")?0:x?barAX-barRestX:barAY-barRestY;}
     /**
      * Dragging a floating window, and the taps on it. This listener consumes the touches, so the gestures are
      * recognised here rather than by the view: a tap opens, two taps do doubleTap, a long press long-clicks.
@@ -58,59 +125,126 @@ public class FloatingService extends Service {
             handler.postDelayed(hold,500);
         }
         void stopHold(){if(hold!=null){handler.removeCallbacks(hold);hold=null;}if(holdNotice!=null){holdNotice=null;updateSummary(true);}}
+        boolean swiped,movingEdge;Runnable edgeHold;
+        /**
+         * The edge handle: dragged up and down along its edge; a swipe inwards (to the right on the left edge, to the
+         * left on the right edge) opens it and a swipe back closes it; dragged across more than half the screen it
+         * moves to the other edge.
+         */
+        boolean edgeMove(float dx,float dy,float rawX){
+            if(!edgeStyle||grip!=barGrip)return false;
+            Rect b=wm.getMaximumWindowMetrics().getBounds();int swipe=Ui.dp(FloatingService.this,32);
+            float inward=edgeRight?-dx:dx;
+            // Only a long press moves it: an ordinary drag is the swipe that opens and closes it.
+            if(!movingEdge){if(edgeHold!=null){handler.removeCallbacks(edgeHold);edgeHold=null;}}
+            if(!movingEdge&&!swiped&&Math.abs(dx)>Math.abs(dy)&&Math.abs(dx)>swipe){
+                if(inward>0&&!barOpen){swiped=true;barOpen=true;rebuildBar();}
+                else if(inward<0&&barOpen){swiped=true;barOpen=false;if(expanded){expanded=false;buildMenu();}else rebuildBar();}
+                return true;
+            }
+            if(!movingEdge)return true;
+            if(Math.abs(dx)>=b.width()/2f){boolean right=rawX>b.width()/2f;if(right!=edgeRight){edgeRight=right;Store.prefs(FloatingService.this).edit().putBoolean("edgeRight",right).apply();rebuildBar();}}
+            p.y=Math.max(0,Math.min(b.height()-window.getHeight(),sy+(int)dy));fitBar();return true;
+        }
         public boolean onTouch(View v,android.view.MotionEvent e){switch(e.getAction()){
-        case MotionEvent.ACTION_DOWN:x=e.getRawX();y=e.getRawY();sx=p.x;sy=p.y;moved=false;down=android.os.SystemClock.uptimeMillis();startHold(v);return true;
-        case MotionEvent.ACTION_MOVE:float dx=e.getRawX()-x,dy=e.getRawY()-y;if(Math.abs(dx)+Math.abs(dy)>Ui.dp(FloatingService.this,8)){if(!moved)stopHold();moved=true;}if(moved){Rect b=wm.getMaximumWindowMetrics().getBounds();p.x=Math.max(0,Math.min(b.width()-window.getWidth(),sx+(int)dx));p.y=Math.max(0,Math.min(b.height()-window.getHeight(),sy+(int)dy));wm.updateViewLayout(window,p);}return true;
-        case MotionEvent.ACTION_UP:stopHold();
+        case MotionEvent.ACTION_DOWN:x=e.getRawX();y=e.getRawY();sx=p.x;sy=p.y;moved=false;swiped=false;movingEdge=false;down=android.os.SystemClock.uptimeMillis();startHold(v);
+            if(edgeStyle&&grip==barGrip){edgeHold=()->{movingEdge=true;edgeHold=null;v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);};handler.postDelayed(edgeHold,400);}
+            return true;
+        case MotionEvent.ACTION_MOVE:float dx=e.getRawX()-x,dy=e.getRawY()-y;if(Math.abs(dx)+Math.abs(dy)>Ui.dp(FloatingService.this,8)){if(!moved)stopHold();moved=true;}if(moved&&edgeMove(dx,dy,e.getRawX()))return true;if(moved){Rect b=wm.getMaximumWindowMetrics().getBounds();p.x=Math.max(0,Math.min(b.width()-window.getWidth(),sx+(int)dx));p.y=Math.max(0,Math.min(b.height()-window.getHeight(),sy+(int)dy));wm.updateViewLayout(window,p);}return true;
+        case MotionEvent.ACTION_UP:stopHold();if(edgeHold!=null){handler.removeCallbacks(edgeHold);edgeHold=null;}
+            // A long press that did not move is not a tap either.
+            if(movingEdge){movingEdge=false;Store.prefs(FloatingService.this).edit().putInt(key+"Y",p.y+restShift(key,false)).apply();return true;}
             long now=android.os.SystemClock.uptimeMillis();
-            Store.prefs(FloatingService.this).edit().putInt(key+"X",p.x).putInt(key+"Y",p.y).apply();
-            if(moved||!click||fired)return true;
+            // A quick sideways flick on the result window switches between factors and skills; the window goes
+            // back where it was. A slower drag, or a mostly vertical one, just moves the window as before.
+            float fx=e.getRawX()-x,fy=e.getRawY()-y;
+            // Against a screen edge the window cannot move that way at all, so a sideways swipe there switches however slow it was.
+            boolean pinned=p.x==sx;
+            if(moved&&v==summary&&(now-down<=FLICK_MS||pinned)&&Math.abs(fx)>=Ui.dp(FloatingService.this,48)&&Math.abs(fx)>Math.abs(fy)*2){
+                p.x=sx;p.y=sy;wm.updateViewLayout(window,p);
+                switchMode(CaptureService.skillMode(FloatingService.this)?Store.FACTOR:Store.SKILL);
+                return true;
+            }
+            Store.prefs(FloatingService.this).edit().putInt(key+"X",p.x+restShift(key,true)).putInt(key+"Y",p.y+restShift(key,false)).apply();
+            if(moved&&v==summary){
+                summaryHomeX=p.x;summaryRight=p.x+window.getWidth()>=wm.getCurrentWindowMetrics().getBounds().width()-Ui.dp(FloatingService.this,8);
+                Store.prefs(FloatingService.this).edit().putBoolean("summaryRight",summaryRight).apply();
+            }
+            if(moved||swiped||!click||fired)return true;
             // Held past the start of the countdown but let go before the end: cancelled, and not a tap either.
             if(now-down>=500&&v.hasOnLongClickListeners())return true;
             if(doubleTap==null){v.performClick();return true;}
             if(now-lastTap<400){if(pending!=null)handler.removeCallbacks(pending);pending=null;lastTap=0;doubleTap.run();return true;}
             lastTap=now;pending=v::performClick;handler.postDelayed(pending,400);
             return true;
-        case MotionEvent.ACTION_CANCEL:stopHold();return true;
+        case MotionEvent.ACTION_CANCEL:stopHold();if(edgeHold!=null){handler.removeCallbacks(edgeHold);edgeHold=null;}movingEdge=false;return true;
         }return false;}});}
-    void buildMenu(){if(menuScroll!=null){bar.removeView(menuScroll);menuScroll=null;}barParams.width=Ui.dp(this,expanded?280:128);wm.updateViewLayout(bar,barParams);if(!expanded)return;menu=Ui.column(this);
+    void buildMenu(){Ui.palette(this);if(menuScroll!=null){bar.removeView(menuScroll);menuScroll=null;}rebuildBar();if(!expanded)return;menu=Ui.column(this);menu.setBackgroundColor(Color.TRANSPARENT);menu.setPadding(Ui.dp(this,12),Ui.dp(this,12),Ui.dp(this,12),Ui.dp(this,4));
+        // The two kinds of preset are listed separately: in skill support only skill presets make sense.
+        boolean skillMode=CaptureService.skillMode(this);
+        boolean factorMode=!skillMode;
         String kind=Store.FACTOR;
+        // Full width, or the weighted buttons inside collapse to nothing and the row cannot be tapped.
+        LinearLayout modes=new LinearLayout(this);modes.setBackground(Ui.rounded(this,Ui.SURFACE,22));modes.setPadding(Ui.dp(this,4),Ui.dp(this,4),Ui.dp(this,4),Ui.dp(this,4));
+        menu.addView(modes,new LinearLayout.LayoutParams(-1,-2));
+        modes.addView(modeButton("因子",Store.FACTOR,factorMode),new LinearLayout.LayoutParams(0,Ui.dp(this,38),1));
+        modes.addView(modeButton("スキル",Store.SKILL,skillMode),new LinearLayout.LayoutParams(0,Ui.dp(this,38),1));
         JSONArray all=new JSONArray();JSONArray stored=Store.all(this);
         for(int i=0;i<stored.length();i++)if(Store.kindOf(stored.optJSONObject(i)).equals(kind))all.put(stored.optJSONObject(i));
         String[] names=new String[all.length()];int selected=0;JSONObject current=Store.selected(this,kind);
         for(int i=0;i<all.length();i++){names[i]=all.optJSONObject(i).optString("name");if(current!=null&&current.optString("id").equals(all.optJSONObject(i).optString("id")))selected=i;}
-        if(names.length>0){
-            TextView kindLabel=new TextView(this);kindLabel.setText("プリセット");menu.addView(kindLabel);
-            Spinner presets=Ui.spinner(this,names);presets.setSelection(selected);menu.addView(presets);
-            // A spinner fires this once by itself as soon as it is laid out. Acting on that call would rebuild
-            // the menu, which builds another spinner, which fires again: the menu would flicker for ever and no
-            // button could be tapped. Only a selection that actually changes the preset counts.
-            presets.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onNothingSelected(AdapterView<?> p){}
-                public void onItemSelected(AdapterView<?> p,View v,int n,long id){
+        if(names.length>0&&factorMode){
+            String heading="プリセット";
+            TextView kindLabel=new TextView(this);kindLabel.setText(heading);kindLabel.setTextColor(Ui.MUTED);kindLabel.setTextSize(12);
+            kindLabel.setPadding(Ui.dp(this,4),Ui.dp(this,12),0,Ui.dp(this,6));menu.addView(kindLabel);
+            // The one in use as a field; tapping it lists the others.
+            TextView field=new TextView(this);field.setText(names[selected]);field.setTextColor(Ui.INK);field.setTextSize(15);field.setSingleLine();
+            field.setEllipsize(android.text.TextUtils.TruncateAt.END);field.setTypeface(Typeface.create("sans-serif-medium",Typeface.BOLD));
+            field.setGravity(Gravity.CENTER_VERTICAL);field.setPadding(Ui.dp(this,14),0,Ui.dp(this,10),0);
+            var arrow=getDrawable(android.R.drawable.arrow_down_float).mutate();arrow.setTint(Ui.MUTED);field.setCompoundDrawablesRelativeWithIntrinsicBounds(null,null,arrow,null);
+            field.setBackground(Ui.ripple(this,Ui.rounded(this,Ui.SURFACE,14),14));menu.addView(field,new LinearLayout.LayoutParams(-1,Ui.dp(this,48)));
+            int at=selected;
+            field.setOnClickListener(v->{
+                AlertDialog d=new AlertDialog.Builder(this).setTitle(heading).setSingleChoiceItems(names,at,(dialog,n)->{
+                    dialog.dismiss();
                     String chosen=all.optJSONObject(n).optString("id");
                     JSONObject now=Store.selected(FloatingService.this,kind);
                     if(now!=null&&chosen.equals(now.optString("id")))return;
-                    Store.select(FloatingService.this,chosen);refreshSummary();refreshFrames();
-                }});
+                    Store.select(FloatingService.this,chosen);refreshSummary();refreshFrames();buildMenu();
+                }).setNegativeButton("キャンセル",null).create();
+                Ui.show(d,true);
+            });
         }
         // Making and editing presets happens on the app's own screen, where there is room for it; over the game
         // only the choice matters, so the menu stays short enough to read at a glance.
+        if(skillMode)skillSettings(menu,this::buildMenu);
         // The menu itself covers the rows, and these settings change what is drawn over them, so it folds away
         // first: the small settings window is then the only thing between the user and the game.
-        menu.addView(pair(Ui.button(this,"表示設定",()->{expanded=false;buildMenu();settings();}),
-            Ui.button(this,"結果をリセット",()->{CaptureService.resetResults();refreshSummary();refreshFrames();})));
+        java.util.List<View> tiles=new java.util.ArrayList<>();
+        tiles.add(menuTile(android.R.drawable.ic_menu_preferences,"表示設定",false,()->{expanded=false;buildMenu();settings();}));
+        tiles.add(menuTile(android.R.drawable.ic_menu_revert,skillMode?"読み取りリセット":"結果をリセット",false,this::resetCurrent));
         // What is used now and then goes under その他, so the menu stays short over the game.
         java.util.List<String> extras=new java.util.ArrayList<>();java.util.List<Runnable> actions=new java.util.ArrayList<>();
+        extras.add("1つ前の結果を呼び出す");actions.add(this::restorePrevious);
+        extras.add("結果の履歴");actions.add(this::showHistory);
         if(CaptureService.connected){extras.add("画面共有を切る");actions.add(()->{stopService(new Intent(this,CaptureService.class));expanded=false;buildMenu();});}
-        Button quit=Ui.button(this,"終了",()->{stopService(new Intent(this,CaptureService.class));stopSelf();});
-        if(extras.isEmpty())menu.addView(quit);
-        else menu.addView(pair(Ui.button(this,"その他…",()->{
+        if(!extras.isEmpty())tiles.add(menuTile(android.R.drawable.ic_menu_more,"その他",false,()->{
             AlertDialog d=new AlertDialog.Builder(this).setItems(extras.toArray(new String[0]),(dialog,n)->actions.get(n).run()).setNegativeButton("閉じる",null).create();
-            Ui.show(d,true);}),quit));
+            Ui.show(d,true);}));
+        tiles.add(menuTile(android.R.drawable.ic_lock_power_off,"終了",true,()->{stopService(new Intent(this,CaptureService.class));stopSelf();}));
+        // Two to a row; an odd one out takes the whole row.
+        GridLayout grid=new GridLayout(this);grid.setColumnCount(2);
+        var gridLp=new LinearLayout.LayoutParams(-1,-2);gridLp.topMargin=Ui.dp(this,12);menu.addView(grid,gridLp);
+        for(int i=0;i<tiles.size();i++){
+            boolean wide=i==tiles.size()-1&&i%2==0;
+            var lp=new GridLayout.LayoutParams(GridLayout.spec(i/2),GridLayout.spec(i%2,wide?2:1,1f));lp.width=0;lp.height=Ui.dp(this,56);
+            lp.setMargins(i%2==0?0:Ui.dp(this,4),0,i%2==0&&!wide?Ui.dp(this,4):0,Ui.dp(this,8));grid.addView(tiles.get(i),lp);
+        }
         fitMenu();
     }
     /**
      * What a tap, two taps and a long press on the result window do.
+     * gesture can mean "reset" whether factors or skills are being read.
      */
     static final String[] GESTURES={"none","details","reset","toggle","menu"
     };
@@ -118,10 +252,12 @@ public class FloatingService extends Service {
     };
     static final String[] GESTURE_KEYS={"gestureTap","gestureDouble","gestureLong"};
     static final String[] GESTURE_LABELS={"タップ","2回タップ","長押し"};
+    /** Reading factors and reading skills call for different things, so each mode keeps its own gestures. */
     static final String[] FACTOR_DEFAULTS={"details","reset","none"};
+    static final String[] SKILL_DEFAULTS={"details","reset","none"};
     static String gestureKey(String mode,int which){return GESTURE_KEYS[which]+"_"+mode;}
     static String gestureDefault(String mode,int which){
-        return FACTOR_DEFAULTS[which];
+        return (Store.SKILL.equals(mode)?SKILL_DEFAULTS:FACTOR_DEFAULTS)[which];
     }
 
     /** How long the long press counts down before it acts. */
@@ -129,7 +265,7 @@ public class FloatingService extends Service {
     /** Shown in place of the results while a long press counts down; null otherwise. */
     String holdNotice;
     String gestureAction(int which){
-        String mode=Store.FACTOR;
+        String mode=CaptureService.skillMode(this)?Store.SKILL:Store.FACTOR;
         return Store.prefs(this).getString(gestureKey(mode,which),gestureDefault(mode,which));
     }
     /** What a gesture does, for the countdown; null when it does nothing. */
@@ -141,14 +277,234 @@ public class FloatingService extends Service {
         String action=gestureAction(which);
         switch(action){
             case "details" -> showDetails();
-            case "reset" -> {CaptureService.resetResults();refreshSummary();refreshFrames();Ui.toast(this,"リセットしました");}
+            case "reset" -> {resetCurrent();Ui.toast(this,"リセットしました");}
             case "toggle" -> {if(CaptureService.running)CaptureService.pause(this);else if(CaptureService.connected)CaptureService.resume(this);}
             case "menu" -> {expanded=!expanded;buildMenu();}
             default -> {}
         }
     }
 
+    /** Recognition reads either the factor list or the skill list; the button row shows which is on. */
+    /** One side of the 因子 | スキル switch: the one in use is a raised pill. */
+    TextView modeButton(String label,String mode,boolean active){
+        TextView button=new TextView(this);button.setText(label);button.setGravity(Gravity.CENTER);button.setTextSize(14);
+        button.setTypeface(Typeface.create("sans-serif-medium",Typeface.BOLD));button.setTextColor(active?Ui.ACCENT:Ui.MUTED);
+        if(active)button.setBackground(Ui.rounded(this,Ui.CARD,19));
+        button.setOnClickListener(v->{if(!active)switchMode(mode);});
+        return button;
+    }
+    /** How quick a sideways flick on the result window has to be to switch modes rather than move the window. */
+    static final long FLICK_MS=300;
+    /** Switches what is read - the menu's mode buttons and the flick on the result window both come here. */
+    void switchMode(String mode){
+        // The results of both modes stay: switching only changes which one is read and shown.
+        Store.prefs(this).edit().putString("mode",mode).commit();
+        buildMenu();refreshSummary();refreshFrames();
+        bubble(Store.SKILL.equals(mode)?"スキルモード":"因子モード");
+    }
+    /** The bubble on screen now, so a quick second switch replaces it rather than stacking another. */
+    private TextView bubble;
+    /**
+     * A large word in the middle of the screen that fades out after a moment: which mode a flick switched to. It
+     * lets every touch through, so the game can be played while it shows.
+     */
+    void bubble(String text){
+        if(bubble!=null){bubble.animate().cancel();try{wm.removeView(bubble);}catch(Exception ignored){}bubble=null;}
+        TextView view=new TextView(this);view.setText(text);view.setTextSize(22);view.setTextColor(Color.WHITE);
+        view.setTypeface(null,Typeface.BOLD);view.setGravity(Gravity.CENTER);
+        int padX=Ui.dp(this,28),padY=Ui.dp(this,16);view.setPadding(padX,padY,padX,padY);
+        var shape=new android.graphics.drawable.GradientDrawable();shape.setColor(0xcc202b2c);shape.setCornerRadius(Ui.dp(this,24));
+        view.setBackground(shape);
+        var p=new WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT,WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE|WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,PixelFormat.TRANSLUCENT);
+        p.gravity=Gravity.CENTER;
+        wm.addView(view,p);bubble=view;
+        view.animate().alpha(0f).setStartDelay(700).setDuration(400).withEndAction(()->{
+            if(bubble==view){try{wm.removeView(view);}catch(Exception ignored){}bubble=null;}
+        }).start();
+    }
+    /**
+     * Skill support: the event, the running style, and the skills read so far. The plan is worked out when the
+     * button is pressed, with the points left at that moment, and its skills are framed on screen until bought.
+     */
+    /**
+     * The skill details, in two tabs: スキル, the skills read so far, and 設定, the same settings as the menu's. The
+     * tab last looked at is the one that opens.
+     */
+    void renderSkillDetails(){
+        var preset=Store.selected(this,Store.SKILL);
+        var rows=CaptureService.skillsInOrder();
+        int tab=Store.prefs(this).getInt("skillDetailTab",0);
+        boolean tools=CaptureService.usesTools(this),levelsShown=CaptureService.usesSkillSet(this);
+        JSONObject set=levelsShown?Store.selected(this):null;
+        String signature=tab+"/"+CaptureService.skillFrameMode(this)+rows.toString()+CaptureService.ownedPt+CaptureService.planned+String.valueOf(preset)+String.valueOf(set);
+        if(signature.equals(detailSignature))return;detailSignature=signature;
+        detailTabs.removeAllViews();detailBody.removeAllViews();
+        LinearLayout switcher=new LinearLayout(this);switcher.setBackground(Ui.rounded(this,Ui.SURFACE,22));switcher.setPadding(Ui.dp(this,4),Ui.dp(this,4),Ui.dp(this,4),Ui.dp(this,4));
+        String[] tabs={"スキル","設定"};
+        for(int i=0;i<tabs.length;i++){int n=i;
+            TextView t=new TextView(this);t.setText(tabs[i]);t.setGravity(Gravity.CENTER);t.setTextSize(14);t.setTypeface(Typeface.create("sans-serif-medium",Typeface.BOLD));
+            t.setTextColor(n==tab?Ui.ACCENT:Ui.MUTED);if(n==tab)t.setBackground(Ui.rounded(this,Ui.CARD,19));
+            t.setOnClickListener(v->{if(n!=tab){Store.prefs(this).edit().putInt("skillDetailTab",n).apply();detailSignature="";renderDetails();}});
+            switcher.addView(t,new LinearLayout.LayoutParams(Ui.dp(this,140),Ui.dp(this,38)));
+        }
+        detailTabs.addView(switcher);
+        if(tab==1){skillSettings(detailBody,()->{detailSignature="";renderDetails();if(expanded)buildMenu();});return;}
+        var gains=java.util.Map.<String,Double>of();var banned=java.util.Set.<String>of();var plan=java.util.Set.<String>of();
+        var levels=levelsShown?Store.rules(this):java.util.Map.<String,java.util.List<Store.Rule>>of();
+        java.util.List<CharSequence> take=new java.util.ArrayList<>(),rest=new java.util.ArrayList<>(),
+                                     owned=new java.util.ArrayList<>(),unknown=new java.util.ArrayList<>();
+        for(var row:rows){
+            String key=Store.normalize(row.name());Double gain=gains.get(key);
+            String price=row.acquired()?"取得済":row.pt()>0?row.pt()+"pt":"pt不明";
+            String rate=gain!=null&&row.pt()>0?String.format(java.util.Locale.JAPAN,"  %.2fバ  %.4fバ/pt",gain,gain/row.pt()):"";
+            // The preset's level as a bar of its colour in front of the name.
+            var line=new android.text.SpannableStringBuilder();
+            int level=Store.registered(levels,row.name());int color=level>=0&&level<=Store.PRIORITY_MAX?FactorFrames.color(level):0;
+            if(color!=0){line.append("▌ ");line.setSpan(new android.text.style.ForegroundColorSpan(color),0,1,android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);}
+            line.append(row.name()).append("  ").append(price).append(rate);
+            if(banned.contains(key))continue;
+            if(row.acquired())owned.add(line);
+            else if(plan.contains(row.name()))take.add(line);
+            else if(tools&&gain==null)unknown.add(line);
+            else rest.add(line);
+        }
+        if(tools){section("取る（枠を表示中）",take);section("候補",rest);section("効率データなし",unknown);}
+        else section("読み取ったスキル",rest);
+        section("取得済",owned);
+        if(rows.isEmpty()){TextView empty=new TextView(this);empty.setText("スキル取得画面を一度スクロールすると、ここに一覧が出ます。");empty.setTextColor(Ui.MUTED);detailBody.addView(empty);}
+    }
+    /**
+     * The skill screen's settings: 動作モード, then what it uses - the event and running style (with the efficiency data), the preset
+     * (the factor preset: see CaptureService.skillMark). The same fields in the menu and in the details' 設定 tab;
+     * refresh rebuilds whichever shows them.
+     */
+    void skillSettings(LinearLayout into,Runnable refresh){
+        int mode=CaptureService.skillFrameMode(this);
+        into.addView(settingField("動作モード",CaptureService.FRAME_MODES[mode],null,()->chooseFrameMode(refresh)));
+        if(CaptureService.usesSkillSet(this)){
+            JSONObject set=Store.selected(this);
+            JSONArray entries=set==null?null:set.optJSONArray("entries");
+            into.addView(settingField("プリセット（因子と共通）",set==null?"未作成（タップして作成）":set.optString("name"),entries==null?null:entries.length()+"件",()->choosePreset(refresh)));
+        }
+    }
+    TextView fieldLabel(String text){
+        TextView label=new TextView(this);label.setText(text);label.setTextColor(Ui.MUTED);label.setTextSize(12);
+        label.setPadding(Ui.dp(this,4),Ui.dp(this,12),0,Ui.dp(this,6));return label;
+    }
+    /** A heading and a field showing the value, which opens a choice when tapped. */
+    View settingField(String heading,String value,String note,Runnable tap){
+        LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.addView(fieldLabel(heading));
+        TextView field=new TextView(this);field.setTextColor(Ui.INK);field.setTextSize(15);field.setSingleLine();
+        var text=new android.text.SpannableStringBuilder(value);
+        if(note!=null){int at=text.length();text.append("   ").append(note);
+            text.setSpan(new android.text.style.ForegroundColorSpan(Ui.MUTED),at,text.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            text.setSpan(new android.text.style.RelativeSizeSpan(.8f),at,text.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);}
+        field.setText(text);field.setEllipsize(android.text.TextUtils.TruncateAt.END);field.setTypeface(Typeface.create("sans-serif-medium",Typeface.BOLD));
+        field.setGravity(Gravity.CENTER_VERTICAL);field.setPadding(Ui.dp(this,14),0,Ui.dp(this,10),0);
+        var arrow=getDrawable(android.R.drawable.arrow_down_float).mutate();arrow.setTint(Ui.MUTED);field.setCompoundDrawablesRelativeWithIntrinsicBounds(null,null,arrow,null);
+        field.setBackground(Ui.ripple(this,Ui.rounded(this,Ui.SURFACE,14),14));field.setOnClickListener(v->tap.run());
+        box.addView(field,new LinearLayout.LayoutParams(-1,Ui.dp(this,48)));
+        return box;
+    }
+    void chooseFrameMode(Runnable refresh){
+        java.util.List<Integer> modes=new java.util.ArrayList<>();
+        for(int i=0;i<CaptureService.FRAME_MODES.length;i++)if(CaptureService.FRAME_MODES[i]!=null)modes.add(i);
+        CharSequence[] items=new CharSequence[modes.size()];
+        for(int n=0;n<items.length;n++){int i=modes.get(n);
+            var text=new android.text.SpannableStringBuilder(CaptureService.FRAME_MODES[i]).append("\n");int at=text.length();
+            text.append(CaptureService.FRAME_MODE_NOTES[i]);
+            text.setSpan(new android.text.style.RelativeSizeSpan(.78f),at,text.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            text.setSpan(new android.text.style.ForegroundColorSpan(Ui.MUTED),at,text.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            items[n]=text;
+        }
+        AlertDialog d=new AlertDialog.Builder(this).setTitle("動作モード").setSingleChoiceItems(items,modes.indexOf(CaptureService.skillFrameMode(this)),(dialog,n)->{
+            dialog.dismiss();
+            Store.prefs(this).edit().putInt("skillFrameMode",modes.get(n)).apply();
+            refreshSummary();refreshFrames();refresh.run();
+        }).setNegativeButton("キャンセル",null).create();
+        Ui.show(d,true);
+    }
+    /**
+     * The preset, from the skill screen: the same factor presets as on the factor screen, since a white factor is
+     * the skill of its name. Making and editing one is offered here too, so the skill screen need not be left.
+     */
+    void choosePreset(Runnable refresh){
+        JSONArray all=Store.all(this);java.util.List<JSONObject> presets=new java.util.ArrayList<>();
+        for(int i=0;i<all.length();i++)if(Store.FACTOR.equals(Store.kindOf(all.optJSONObject(i))))presets.add(all.optJSONObject(i));
+        JSONObject current=Store.selected(this);
+        java.util.List<String> items=new java.util.ArrayList<>();java.util.List<Runnable> actions=new java.util.ArrayList<>();
+        Runnable changed=()->{refreshSummary();refreshFrames();refresh.run();};
+        for(JSONObject preset:presets){
+            boolean on=current!=null&&current.optString("id").equals(preset.optString("id"));
+            items.add((on?"✓ ":"　 ")+preset.optString("name"));
+            actions.add(()->{Store.select(this,preset.optString("id"));changed.run();});
+        }
+        if(current!=null){items.add("✎ 「"+current.optString("name")+"」を編集");actions.add(()->Ui.edit(this,true,changed));}
+        items.add("＋ 新規作成");actions.add(()->Ui.newPreset(this,true,changed));
+        AlertDialog d=new AlertDialog.Builder(this).setTitle("プリセット（因子と共通）").setItems(items.toArray(new String[0]),(dialog,n)->actions.get(n).run())
+            .setNegativeButton("閉じる",null).create();
+        Ui.show(d,true);
+    }
+    void section(String title,java.util.List<? extends CharSequence> items){
+        if(items.isEmpty())return;
+        TextView heading=new TextView(this);heading.setText(title+"（"+items.size()+"）");heading.setTextSize(17);heading.setTypeface(null,Typeface.BOLD);
+        heading.setPadding(0,Ui.dp(this,12),0,Ui.dp(this,4));detailBody.addView(heading);
+        for(CharSequence item:items){TextView row=new TextView(this);row.setText(item);row.setTextSize(14);row.setPadding(0,Ui.dp(this,4),0,Ui.dp(this,4));detailBody.addView(row);}
+    }
+    /** Resets what the current mode has read, saving it to the result history first. */
+    void resetCurrent(){
+        String mode=CaptureService.skillMode(this)?Store.SKILL:Store.FACTOR;
+        ResultHistory.save(this,mode);CaptureService.resetResults(mode);
+        refreshSummary();refreshFrames();
+    }
+    /** The current mode's saved results, newest first: looked at, and put back to read on from. */
+    void showHistory(){
+        String mode=CaptureService.skillMode(this)?Store.SKILL:Store.FACTOR;
+        var entries=ResultHistory.of(this,mode);
+        if(entries.isEmpty()){Ui.toast(this,"まだ履歴がありません（リセットしたときに保存されます）");return;}
+        String[] items=new String[entries.size()];
+        for(int i=0;i<items.length;i++)items[i]=entries.get(i).when()+"　"+entries.get(i).summary();
+        AlertDialog d=new AlertDialog.Builder(this).setTitle((Store.SKILL.equals(mode)?"スキル":"因子")+"の結果の履歴")
+            .setItems(items,(dialog,n)->showHistoryEntry(entries.get(n))).setNegativeButton("閉じる",null).create();
+        Ui.show(d,true);
+    }
+    void showHistoryEntry(ResultHistory.Entry entry){
+        TextView text=new TextView(this);text.setText(ResultHistory.text(entry));text.setTextColor(Ui.INK);text.setTextSize(14);text.setTextIsSelectable(true);
+        text.setPadding(Ui.dp(this,20),Ui.dp(this,8),Ui.dp(this,20),Ui.dp(this,8));
+        ScrollView scroll=new ScrollView(this);scroll.addView(text);
+        AlertDialog d=new AlertDialog.Builder(this).setTitle(entry.when()+"の結果").setView(scroll)
+            .setPositiveButton("この結果を呼び出す",(dialog,w)->restoreResult(entry)).setNegativeButton("閉じる",null).create();
+        Ui.show(d,true);
+    }
+    /** Puts a saved result back; what the mode held is saved first, so nothing is lost either way. */
+    void restoreResult(ResultHistory.Entry entry){
+        ResultHistory.restore(this,entry);refreshSummary();refreshFrames();if(details!=null&&details.isShowing()){detailSignature="";renderDetails();}
+        Ui.toast(this,entry.when()+" の結果を呼び出しました。続きから読み取れます");
+    }
+    void restorePrevious(){
+        String mode=CaptureService.skillMode(this)?Store.SKILL:Store.FACTOR;
+        var entry=ResultHistory.previous(this,mode);
+        if(entry==null){Ui.toast(this,"呼び出せる前の結果がありません");return;}
+        restoreResult(entry);
+    }
     /** Two buttons side by side, each half the menu's width. */
+    /** A button of the menu: its icon in a soft circle and its name, on a tile. danger is for 終了, in red. */
+    View menuTile(int icon,String name,boolean danger,Runnable action){
+        int color=danger?(Ui.dark(this)?0xfff06e6e:0xffd03a3a):Ui.ACCENT;
+        LinearLayout tile=new LinearLayout(this);tile.setGravity(Gravity.CENTER_VERTICAL);tile.setPadding(Ui.dp(this,10),0,Ui.dp(this,8),0);
+        tile.setBackground(Ui.ripple(this,Ui.rounded(this,Ui.SURFACE,14),14));tile.setOnClickListener(v->action.run());
+        android.widget.ImageView image=new android.widget.ImageView(this);var drawable=getDrawable(icon).mutate();drawable.setTint(color);image.setImageDrawable(drawable);
+        int pad=Ui.dp(this,7);image.setPadding(pad,pad,pad,pad);
+        // A pale tint of the red behind 終了, the same way as the teal behind the others - never a dark disc.
+        image.setBackground(Ui.rounded(this,danger?(Ui.dark(this)?0xff3c2224:0xfffbe3e3):Ui.ICON_BG,16));
+        tile.addView(image,new LinearLayout.LayoutParams(Ui.dp(this,32),Ui.dp(this,32)));
+        TextView label=new TextView(this);label.setText(name);label.setTextColor(danger?color:Ui.INK);label.setTextSize(13);label.setSingleLine();
+        label.setEllipsize(android.text.TextUtils.TruncateAt.END);label.setTypeface(Typeface.create("sans-serif-medium",Typeface.BOLD));label.setPadding(Ui.dp(this,8),0,0,0);
+        tile.addView(label,new LinearLayout.LayoutParams(0,-2,1));
+        return tile;
+    }
     LinearLayout pair(Button left,Button right){
         LinearLayout row=new LinearLayout(this);
         row.addView(left,new LinearLayout.LayoutParams(0,-2,1));row.addView(right,new LinearLayout.LayoutParams(0,-2,1));
@@ -171,8 +527,11 @@ public class FloatingService extends Service {
         int wanted=menu.getMeasuredHeight(),room=screen.height()-barParams.y-row-margin;
         int enough=Math.min(wanted,Math.max(Ui.dp(this,240),screen.height()/2));
         if(room<enough){barParams.y=Math.max(0,screen.height()-row-margin-enough);room=screen.height()-barParams.y-row-margin;}
-        menuScroll=new ScrollView(this);menuScroll.addView(menu);
-        bar.addView(menuScroll,new LinearLayout.LayoutParams(-1,Math.max(0,Math.min(wanted,room))));
+        // A rounded card under the bar, with a hairline so it stands apart from a game of the same shade.
+        menuScroll=new ScrollView(this);menuScroll.addView(menu);menuScroll.setVerticalScrollBarEnabled(false);
+        var card=Ui.rounded(this,Ui.CARD,20);card.setStroke(Ui.dp(this,1),Ui.LINE);menuScroll.setBackground(card);menuScroll.setClipToOutline(true);
+        var cardLp=new LinearLayout.LayoutParams(-1,Math.max(0,Math.min(wanted,room)));cardLp.topMargin=Ui.dp(this,8);
+        bar.addView(menuScroll,cardLp);
         wm.updateViewLayout(bar,barParams);
     }
     /** Keeps a floating window fully on screen, e.g. after rotating to landscape. */
@@ -190,7 +549,9 @@ public class FloatingService extends Service {
     /** The processing figures (cycles per second, stage timings…) in their own small draggable window, toggled in 表示設定. */
     /** Full-screen, touch-through layer for the factor frames, toggled in 表示設定. */
     void refreshFrames(){
-        boolean on=Store.prefs(this).getBoolean("factorFrames",false);
+        // Skill support is built around the frames - they are what says which rows were read and which to buy -
+        // so there they are always on, whatever the factor screen's own setting says.
+        boolean on=Store.prefs(this).getBoolean("factorFrames",true)||CaptureService.skillMode(this);
         // Overlay windows stack in the order they are added. The frames window is added once, before the control
         // bar, and then only reloaded and shown or hidden: added again it would cover the menu and the dialogs.
         if(frames!=null){frames.reload();frames.setVisibility(on?View.VISIBLE:View.GONE);return;}
@@ -209,41 +570,70 @@ public class FloatingService extends Service {
         statsParams=params("stats",1);statsParams.width=WindowManager.LayoutParams.WRAP_CONTENT;
         wm.addView(stats,statsParams);drag(stats,stats,statsParams,"stats",false);
     }
-    void refreshSummary(){if(summary!=null){wm.removeView(summary);summary=null;}var prefs=Store.prefs(this);if(!prefs.getBoolean("showSummary",true))return;
+    void refreshSummary(){if(summary!=null){wm.removeView(summary);summary=null;}
+        // A new window starts empty: the text last shown has to be put in again, even if it is the same.
+        shownSummary=null;var prefs=Store.prefs(this);if(!prefs.getBoolean("showSummary",true))return;
         OutlinedTextView outlined=new OutlinedTextView(this);summary=outlined;summary.setPadding(Ui.dp(this,8),Ui.dp(this,8),Ui.dp(this,8),Ui.dp(this,8));summary.setTextSize(prefs.getInt("fontSize",14));summary.setTextColor(prefs.getInt("textColor",Color.WHITE));
         outlined.setOutline(prefs.getInt("outlineColor",Color.BLACK),prefs.getBoolean("outline",true)?Ui.dp(this,prefs.getInt("outlineWidth",3)):0);
         int bg=prefs.getInt("bgColor",Color.BLACK);int alpha=prefs.getBoolean("transparent",false)?prefs.getInt("opacity",128):255;
-        summary.setBackgroundColor(Color.argb(alpha,Color.red(bg),Color.green(bg),Color.blue(bg)));summaryParams=params("summary",1);updateSummary(false);wm.addView(summary,summaryParams);summary.setOnClickListener(v->gesture(0));
+        summary.setBackgroundColor(Color.argb(alpha,Color.red(bg),Color.green(bg),Color.blue(bg)));summaryParams=params("summary",1);summaryHomeX=summaryParams.x;summaryRight=prefs.getBoolean("summaryRight",false);updateSummary(false);wm.addView(summary,summaryParams);summary.setOnClickListener(v->gesture(0));
         summary.setOnLongClickListener(v->{gesture(2);return true;});
         drag(summary,summary,summaryParams,"summary",true,()->gesture(1));
     }
+    /** The summary text last put in the window, before its marks were turned into colours. */
+    String shownSummary;
+    /** The summary with each marked glyph (see CaptureService.MARK) painted in its frame's colour. */
+    static CharSequence frameColored(String text){
+        if(text.indexOf(CaptureService.MARK)<0)return text;
+        android.text.SpannableStringBuilder b=new android.text.SpannableStringBuilder();
+        for(int i=0;i<text.length();i++){
+            char ch=text.charAt(i);
+            if(ch==CaptureService.MARK&&i+2<text.length()){
+                int color=FactorFrames.color(text.charAt(i+1)-'0'),start=b.length();
+                b.append(text.charAt(i+2));
+                if(color!=0)b.setSpan(new FillColor(color),start,b.length(),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                i+=2;
+            }else b.append(ch);
+        }
+        return b;
+    }
+    /** Colours a glyph's fill only: the outline pass of OutlinedTextView draws with a stroke and keeps the outline colour. */
+    static final class FillColor extends android.text.style.CharacterStyle{
+        final int color;FillColor(int color){this.color=color;}
+        @Override public void updateDrawState(android.text.TextPaint paint){if(paint.getStyle()==Paint.Style.FILL)paint.setColor(color);}
+    }
+    /** Where the result window was put by hand, and whether against the right edge: it grows away from that edge. */
+    int summaryHomeX;boolean summaryRight;
     void updateSummary(boolean attached){
-        String text=holdNotice!=null?holdNotice:CaptureService.summary(this);if(!text.contentEquals(summary.getText()))summary.setText(text);
+        String text=holdNotice!=null?holdNotice:CaptureService.summary(this);if(!text.equals(shownSummary)){shownSummary=text;summary.setText(frameColored(text));}
         summary.setVisibility(text.isEmpty()?View.GONE:View.VISIBLE);if(text.isEmpty())return;
         Rect bounds=wm.getCurrentWindowMetrics().getBounds();
         summary.measure(View.MeasureSpec.makeMeasureSpec(bounds.width(),View.MeasureSpec.AT_MOST),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));
         int width=summary.getMeasuredWidth();
-        int x=Math.max(0,Math.min(summaryParams.x,bounds.width()-width));
+        // Where it was left, not where a longer text last pushed it; left against the right edge, it keeps to it.
+        int x=summaryRight?bounds.width()-width:Math.max(0,Math.min(summaryHomeX,bounds.width()-width));
         int y=Math.max(0,Math.min(summaryParams.y,bounds.height()-summary.getMeasuredHeight()));
         if(summaryParams.width!=width||summaryParams.x!=x||summaryParams.y!=y){
             summaryParams.width=width;summaryParams.x=x;summaryParams.y=y;
+            android.util.Log.d("FactorSummary","結果ウィンドウ w="+width+" x="+x+" y="+y+" 文字「"+text+"」");
             if(attached)wm.updateViewLayout(summary,summaryParams);
         }
     }
-    void showDetails(){
+    void showDetails(){Ui.palette(this);
         if(details!=null&&details.isShowing())return;
         LinearLayout content=Ui.column(this);HorizontalScrollView tabsScroll=new HorizontalScrollView(this);detailTabs=new LinearLayout(this);tabsScroll.addView(detailTabs);content.addView(tabsScroll);
         ScrollView rows=new ScrollView(this);detailBody=Ui.column(this);rows.addView(detailBody);content.addView(rows,new LinearLayout.LayoutParams(-1,0,1));
-        details=new AlertDialog.Builder(this).setTitle("取得した因子").setView(content).setPositiveButton("閉じる",null).create();Ui.show(details,true);
+        details=new AlertDialog.Builder(this).setTitle(CaptureService.skillMode(this)?"スキル":"取得した因子").setView(content).setPositiveButton("閉じる",null).create();Ui.show(details,true);
         Rect bounds=wm.getMaximumWindowMetrics().getBounds();details.getWindow().setLayout(Math.min(Ui.dp(this,360),bounds.width()-Ui.dp(this,24)),Math.min(Ui.dp(this,560),bounds.height()-Ui.dp(this,80)));
         detailSignature="";renderDetails();
     }
     void renderDetails(){
+        if(CaptureService.skillMode(this)){renderSkillDetails();return;}
         // When the chosen page is gone, open the first page that exists (e.g. only 再獲得因子2 was read), not an empty 元因子.
         var data=CaptureService.snapshot();if(!data.containsKey(detailLabel))detailLabel=data.isEmpty()?"元因子":data.keySet().iterator().next();
         String signature=data.toString()+String.valueOf(Store.selected(this))+detailLabel;
         if(signature.equals(detailSignature))return;detailSignature=signature;detailTabs.removeAllViews();
-        for(String label:data.keySet()){Button tab=Ui.button(this,label,()->{detailLabel=label;detailSignature="";renderDetails();});tab.setTextColor(label.equals(detailLabel)?0xff008b8b:Color.DKGRAY);tab.setSelected(label.equals(detailLabel));detailTabs.addView(tab);}
+        for(String label:data.keySet()){Button tab=Ui.button(this,label,()->{detailLabel=label;detailSignature="";renderDetails();});tab.setTextColor(label.equals(detailLabel)?Ui.ACCENT:Ui.MUTED);tab.setSelected(label.equals(detailLabel));detailTabs.addView(tab);}
         detailBody.removeAllViews();var factors=data.getOrDefault(detailLabel,java.util.Map.<String,Integer>of());var rules=Store.rules(this);
         var order=CaptureService.places.ordered(detailLabel,factors.keySet());
         for(String tier:new String[]{"必須","重要","必要","本育成で取得可能","条件未達","除外","未設定"}){
@@ -260,7 +650,7 @@ public class FloatingService extends Service {
     String settingsTab="枠と行";
     static final String[] SETTINGS_TABS={"枠と行","結果表示","操作","認識"};
 
-    void settings(){
+    void settings(){Ui.palette(this);
         LinearLayout content=Ui.column(this);
         TextView grip=new TextView(this);grip.setText("⋮⋮  ここを押したまま動かすと、このウィンドウを移動できます");
         grip.setTextSize(12);grip.setPadding(0,Ui.dp(this,4),0,Ui.dp(this,8));content.addView(grip);
@@ -272,7 +662,7 @@ public class FloatingService extends Service {
             tabs.removeAllViews();body.removeAllViews();
             for(String tab:SETTINGS_TABS){
                 Button button=Ui.button(this,tab,()->{if(!tab.equals(settingsTab)){settingsTab=tab;build[0].run();}});
-                button.setTextColor(tab.equals(settingsTab)?0xff008b8b:Color.DKGRAY);
+                button.setTextColor(tab.equals(settingsTab)?Ui.ACCENT:Ui.MUTED);
                 tabs.addView(button,new LinearLayout.LayoutParams(0,-2,1));
             }
             switch(settingsTab){
@@ -296,6 +686,19 @@ public class FloatingService extends Service {
         p.x=Store.prefs(this).getInt("settingsX",Math.max(0,(screen.width()-Ui.dp(this,330))/2));
         p.y=Store.prefs(this).getInt("settingsY",Math.max(0,screen.height()-Ui.dp(this,440)));
         window.setAttributes(p);
+        // The window sits low, so the keyboard for a typed number covered all of it: while the keyboard is up
+        // the window moves up out of its way, and goes back to where it was when the keyboard goes.
+        int[] home={p.y};
+        window.getDecorView().setOnApplyWindowInsetsListener((v,insets)->{
+            int covered=insets.getInsets(WindowInsets.Type.ime()).bottom;
+            if(!insets.isVisible(WindowInsets.Type.ime())){if(p.y!=home[0]){p.y=home[0];window.setAttributes(p);}}
+            else{
+                if(covered>0){p.y=Math.max(0,p.y-covered-Ui.dp(this,8));window.setAttributes(p);}
+                View focused=v.findFocus();
+                if(focused!=null)v.postDelayed(()->focused.requestRectangleOnScreen(new Rect(0,0,focused.getWidth(),focused.getHeight()),false),150);
+            }
+            return v.onApplyWindowInsets(insets);
+        });
         grip.setOnTouchListener(new View.OnTouchListener(){float x,y;int sx,sy;
             public boolean onTouch(View v,MotionEvent e){
                 switch(e.getAction()){
@@ -305,7 +708,7 @@ public class FloatingService extends Service {
                         p.y=Math.max(0,Math.min(screen.height()-Ui.dp(FloatingService.this,120),sy+(int)(e.getRawY()-y)));
                         window.setAttributes(p);return true;
                     case MotionEvent.ACTION_UP:
-                        Store.prefs(FloatingService.this).edit().putInt("settingsX",p.x).putInt("settingsY",p.y).apply();return true;
+                        home[0]=p.y;Store.prefs(FloatingService.this).edit().putInt("settingsX",p.x).putInt("settingsY",p.y).apply();return true;
                 }
                 return false;
             }});
@@ -315,13 +718,24 @@ public class FloatingService extends Service {
     void frameSettings(LinearLayout content){
         var prefs=Store.prefs(this);
         Switch factorFrames=new Switch(this);factorFrames.setText("因子に枠を付ける（優先度の順に 赤・橙・黄・緑・青・藍・紫、条件未達は灰）");
-        factorFrames.setChecked(prefs.getBoolean("factorFrames",false));content.addView(factorFrames);
+        factorFrames.setChecked(prefs.getBoolean("factorFrames",true));content.addView(factorFrames);
         factorFrames.setOnCheckedChangeListener((v,on)->{prefs.edit().putBoolean("factorFrames",on).apply();refreshFrames();});
+        Ui.section(content,"行に重ねる表示（スキル）");
+        Switch showNames=new Switch(this);showNames.setText("認識したスキル名を表示する");showNames.setChecked(prefs.getBoolean("showSkillNames",false));content.addView(showNames);
+        showNames.setOnCheckedChangeListener((v,on)->{prefs.edit().putBoolean("showSkillNames",on).apply();CaptureService.showNames=on;});
+        slider(content,"文字サイズ",0,80,"nameTextSize",38,this::refreshFrames);
+        slider(content,"上下位置",0,100,"rowTextDrop",58,this::refreshFrames);
+        slider(content,"左右位置",-100,200,"nameTextShift",0,this::refreshFrames);
+        colors(content,"文字色","rowTextColor",0xff202b2c,this::refreshFrames);
+        colors(content,"縁取りの色","rowOutlineColor",Color.WHITE,this::refreshFrames);
+        slider(content,"縁取りの太さ",0,40,"rowOutlineWidth",14,this::refreshFrames);
     }
 
     /** Which action each gesture on the result window runs. */
     void gestureSettings(LinearLayout content){
-        gestureGroup(content,"結果ウィンドウ",Store.FACTOR);
+        // Only the mode being used is shown: the other one's settings are noise while adjusting this one.
+        boolean skill=CaptureService.skillMode(this);
+        gestureGroup(content,skill?"スキルモード":"因子モード",skill?Store.SKILL:Store.FACTOR);
         TextView note=new TextView(this);note.setTextSize(12);
         note.setText("結果のフローティング表示に対する操作です。2回タップを使うと、1回タップの反応が0.4秒ほど遅れます。長押しは"+HOLD_SECONDS+"秒のカウントダウンが0になるまで押し続けると実行され、途中で離すと中止します。");
         content.addView(note);
@@ -367,9 +781,10 @@ public class FloatingService extends Service {
         content.addView(Ui.button(this,"認識回数を適用",()->{try{String value=CycleLimit.validate(rate.getText().toString());prefs.edit().putString("recognitionRateText",value).apply();Ui.toast(this,"認識回数を保存しました");}catch(Exception e){rate.setError("1以上の整数を入力してください");}}));
         Switch showStats=new Switch(this);showStats.setText("処理状況をフローティング表示（回/秒・処理時間など）");showStats.setChecked(prefs.getBoolean("showStats",false));content.addView(showStats);
         showStats.setOnCheckedChangeListener((v,on)->{prefs.edit().putBoolean("showStats",on).apply();refreshStats();});
+        Switch auto=new Switch(this);auto.setText("因子画面とスキル取得画面を見分けて、モードを自動で切り替える");
+        auto.setChecked(prefs.getBoolean("autoMode",true));content.addView(auto);
+        auto.setOnCheckedChangeListener((v,on)->prefs.edit().putBoolean("autoMode",on).apply());
         Ui.section(content,"推論");
-        Switch xnnpack=new Switch(this);xnnpack.setText("XNNPACKで推論（実験的：速いがスクロール中の確定が遅れる）");xnnpack.setChecked(prefs.getBoolean("xnnpack",false));content.addView(xnnpack);
-        xnnpack.setOnCheckedChangeListener((v,on)->prefs.edit().putBoolean("xnnpack",on).apply());
         // 自動 measures every thread count and keeps using the fastest; a number pins it. Applied from the next cycle.
         TextView threadsLabel=new TextView(this);threadsLabel.setText("推論スレッド（標準の推論方式のとき）");content.addView(threadsLabel);
         int[] threadOptions=FactorVision.threadOptions(Runtime.getRuntime().availableProcessors());String[] threadNames=new String[threadOptions.length+1];threadNames[0]="自動（おすすめ）";
@@ -410,5 +825,9 @@ public class FloatingService extends Service {
             if(Store.prefs(FloatingService.this).getInt(key,def)==colors[n])return;   // the spinner fires once by itself
             Store.prefs(FloatingService.this).edit().putInt(key,colors[n]).apply();changed.run();}});}
     @Override public int onStartCommand(Intent i,int flags,int id){if(i!=null&&"STOP".equals(i.getAction())){stopService(new Intent(this,CaptureService.class));stopSelf();}return START_NOT_STICKY;}
-    @Override public void onDestroy(){handler.removeCallbacksAndMessages(null);if(details!=null)details.dismiss();if(bar!=null)wm.removeView(bar);if(summary!=null)wm.removeView(summary);if(stats!=null)wm.removeView(stats);if(frames!=null)wm.removeView(frames);super.onDestroy();}
+    /** Drops what the capture service would otherwise call back into this finished service. */
+    void clearListeners(){
+        CaptureService.modeSwitched=null;
+    }
+    @Override public void onDestroy(){shown=false;clearListeners();handler.removeCallbacksAndMessages(null);Store.prefs(this).unregisterOnSharedPreferenceChangeListener(barSettings);if(details!=null)details.dismiss();if(bar!=null)wm.removeView(bar);if(summary!=null)wm.removeView(summary);if(stats!=null)wm.removeView(stats);if(frames!=null)wm.removeView(frames);super.onDestroy();}
 }

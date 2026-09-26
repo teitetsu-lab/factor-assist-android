@@ -19,14 +19,19 @@ android {
     namespace 'jp.factor.overlay'
     compileSdk 35
     defaultConfig {
-        applicationId 'jp.factor.overlay'; minSdk 34; targetSdk 35; versionCode 6; versionName '0.3.0'
+        applicationId 'jp.factor.overlay'; minSdk 34; targetSdk 35; versionCode 7; versionName '0.4.0'
         // Only 64-bit ARM: x86/x86_64 are for emulators, and minSdk 34 leaves no 32-bit ARM devices.
         // ONNX Runtime and ML Kit ship all four, which would be three quarters of the APK.
         ndk { abiFilters 'arm64-v8a' }
     }
     buildFeatures { buildConfig true }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
-    testOptions { unitTests.all { systemProperty 'factor.assets', file('src/main/assets').absolutePath } }
+    testOptions { unitTests.all {
+        systemProperty 'factor.assets', file('src/main/assets').absolutePath
+        // -PtestJava=<java.exe> runs the unit tests on another Java. Android Studio's own ships an older msvcp140.dll,
+        // which ONNX Runtime 1.23 fails to initialise with, so the tests that run the models need one without it.
+        if (project.hasProperty('testJava')) executable = project.property('testJava')
+    } }
     // Release = the optimised build: a debuggable APK runs the Java image preprocessing several times slower.
     // No shrinking, since ONNX Runtime and ML Kit are reached through JNI/reflection.
     buildTypes {

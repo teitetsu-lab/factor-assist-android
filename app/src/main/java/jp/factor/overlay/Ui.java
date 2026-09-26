@@ -8,9 +8,84 @@ import android.widget.*;
 import org.json.*;
 
 final class Ui {
-    static final int INK=0xff202b2c, MUTED=0xff687574, ACCENT=0xff087f78, SURFACE=0xfff1f5f4;
+    /**
+     * The colours of the app's own views, for the theme in use: set by palette(context) before a screen or a floating
+     * window is built. INK text, MUTED secondary text, ACCENT the app's teal, SURFACE a plain button, PAGE the
+     * background of a screen, CARD a card or dialog, LINE a hairline, ICON_BG the circle behind an icon, ON_ACCENT text
+     * on the accent colour.
+     */
+    static int INK=0xff202b2c, MUTED=0xff687574, ACCENT=0xff087f78, SURFACE=0xfff1f5f4,
+        PAGE=0xfff2f4f3, CARD=Color.WHITE, LINE=0xffe4e9e8, ICON_BG=0xffe2f2f0, ON_ACCENT=Color.WHITE, SOFT_ON_ACCENT=0xffc8ebe7;
+    static boolean dark(Context c){
+        return (c.getResources().getConfiguration().uiMode&android.content.res.Configuration.UI_MODE_NIGHT_MASK)==android.content.res.Configuration.UI_MODE_NIGHT_YES;
+    }
+    /** Picks the colours above for the theme c is in. */
+    static void palette(Context c){
+        boolean d=dark(c);
+        INK=d?0xffeceeee:0xff202b2c;MUTED=d?0xff96a09f:0xff687574;ACCENT=d?0xff3abeb0:0xff087f78;SURFACE=d?0xff2a2e32:0xfff1f5f4;
+        PAGE=d?0xff121416:0xfff2f4f3;CARD=d?0xff202326:Color.WHITE;LINE=d?0xff303438:0xffe4e9e8;ICON_BG=d?0xff1e3c3a:0xffe2f2f0;
+        ON_ACCENT=d?0xff0a1e1c:Color.WHITE;SOFT_ON_ACCENT=d?0xff0a3c37:0xffc8ebe7;
+    }
+    /** 0 light, 1 dark, 2 as the phone is (the default). */
+    static int theme(Context c){return Store.prefs(c).getInt("theme",2);}
+    /**
+     * c with its day/night set by the app's setting: the phone's own when that is 端末に従う. overlay is for what is
+     * drawn over the game, which follows the same setting unless 「メニューや詳細もテーマに合わせる」 is off - then it
+     * stays light.
+     */
+    static Context themed(Context c,boolean overlay){
+        int mode=theme(c);
+        if(overlay&&!Store.prefs(c).getBoolean("overlayTheme",true))mode=0;
+        if(mode==2)return c;
+        var config=new android.content.res.Configuration(c.getResources().getConfiguration());
+        config.uiMode=(config.uiMode&~android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+            |(mode==1?android.content.res.Configuration.UI_MODE_NIGHT_YES:android.content.res.Configuration.UI_MODE_NIGHT_NO);
+        return c.createConfigurationContext(config);
+    }
+    static android.graphics.drawable.GradientDrawable rounded(Context c,int color,int radius){
+        var shape=new android.graphics.drawable.GradientDrawable();shape.setColor(color);shape.setCornerRadius(dp(c,radius));return shape;
+    }
+    static android.graphics.drawable.Drawable ripple(Context c,android.graphics.drawable.Drawable content,int radius){
+        return new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x22087f78),content,rounded(c,Color.WHITE,radius));
+    }
+    /** A card added to parent; what goes in it is stacked inside. */
+    static LinearLayout card(LinearLayout parent){
+        Context c=parent.getContext();LinearLayout card=new LinearLayout(c);card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(rounded(c,CARD,18));card.setPadding(dp(c,16),dp(c,12),dp(c,16),dp(c,12));
+        var lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,0,0,dp(c,16));parent.addView(card,lp);return card;
+    }
+    /** The small grey heading above a card. */
+    static void cardLabel(LinearLayout parent,String text){
+        Context c=parent.getContext();TextView label=new TextView(c);label.setText(text);label.setTextColor(MUTED);label.setTextSize(13);
+        label.setTypeface(android.graphics.Typeface.create("sans-serif-medium",android.graphics.Typeface.NORMAL));
+        label.setPadding(dp(c,6),dp(c,4),0,dp(c,8));parent.addView(label);
+    }
+    /** The circle an icon sits in. */
+    static ImageView iconCircle(Context c,int icon,int size){
+        ImageView image=new ImageView(c);var drawable=c.getDrawable(icon).mutate();drawable.setTint(ACCENT);image.setImageDrawable(drawable);
+        int pad=size*9/40;image.setPadding(dp(c,pad),dp(c,pad),dp(c,pad),dp(c,pad));image.setBackground(rounded(c,ICON_BG,size/2));return image;
+    }
+    /** A square-ish tile: an icon, its name, and what it does. */
+    static View tile(Context c,int icon,String title,String sub,Runnable action){
+        LinearLayout tile=new LinearLayout(c);tile.setOrientation(LinearLayout.VERTICAL);tile.setPadding(dp(c,16),dp(c,14),dp(c,12),dp(c,14));
+        tile.setBackground(ripple(c,rounded(c,CARD,18),18));tile.setOnClickListener(v->action.run());
+        tile.addView(iconCircle(c,icon,38),new LinearLayout.LayoutParams(dp(c,38),dp(c,38)));
+        TextView name=new TextView(c);name.setText(title);name.setTextColor(INK);name.setTextSize(15);name.setPadding(0,dp(c,12),0,0);
+        name.setTypeface(android.graphics.Typeface.create("sans-serif-medium",android.graphics.Typeface.BOLD));tile.addView(name);
+        TextView under=new TextView(c);under.setText(sub);under.setTextColor(MUTED);under.setTextSize(11);under.setPadding(0,dp(c,2),0,0);tile.addView(under);
+        return tile;
+    }
+    /** The one action of a screen: a wide, fully rounded button. */
+    static Button pill(Context c,String text,int background,int ink,Runnable action){
+        Button b=button(c,text,action);b.setTextSize(17);b.setTextColor(ink);b.setBackground(ripple(c,rounded(c,background,28),28));
+        b.setMinHeight(dp(c,56));b.setMinimumHeight(dp(c,56));return b;
+    }
+    /** A quiet action: the accent colour on no background. */
+    static Button textButton(Context c,String text,Runnable action){
+        Button b=button(c,text,action);b.setTextColor(ACCENT);b.setBackground(ripple(c,null,18));return b;
+    }
     static int dp(Context c,int n) { return Math.round(n*c.getResources().getDisplayMetrics().density); }
-    static LinearLayout column(Context c) { LinearLayout v=new LinearLayout(c); v.setOrientation(LinearLayout.VERTICAL); v.setPadding(dp(c,12),dp(c,8),dp(c,12),dp(c,8)); v.setBackgroundColor(Color.WHITE);return v; }
+    static LinearLayout column(Context c) { LinearLayout v=new LinearLayout(c); v.setOrientation(LinearLayout.VERTICAL); v.setPadding(dp(c,12),dp(c,8),dp(c,12),dp(c,8)); v.setBackgroundColor(CARD);return v; }
     static android.graphics.drawable.Drawable background(Context c,int color){
         var shape=new android.graphics.drawable.GradientDrawable();shape.setColor(color);shape.setCornerRadius(dp(c,8));
         return new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x22087f78),shape,null);
@@ -24,12 +99,27 @@ final class Ui {
     static Button iconButton(Context c,String text,int icon,Runnable action){
         Button b=button(c,text,action);var drawable=c.getDrawable(icon).mutate();drawable.setTint(ACCENT);drawable.setBounds(0,0,dp(c,20),dp(c,20));b.setCompoundDrawablesRelative(drawable,null,null,null);b.setCompoundDrawablePadding(dp(c,12));b.setGravity(Gravity.CENTER_VERTICAL|Gravity.START);return b;
     }
-    static Button primary(Context c,String text,Runnable action){Button b=button(c,text,action);b.setTextColor(Color.WHITE);b.setBackground(background(c,ACCENT));return b;}
+    static Button primary(Context c,String text,Runnable action){Button b=button(c,text,action);b.setTextColor(ON_ACCENT);b.setBackground(background(c,ACCENT));return b;}
     static void section(LinearLayout parent,String title){
         Context c=parent.getContext();TextView label=new TextView(c);label.setText(title);label.setTextColor(INK);label.setTextSize(17);label.setTypeface(android.graphics.Typeface.create("sans-serif-medium",android.graphics.Typeface.NORMAL));label.setPadding(0,dp(c,24),0,dp(c,10));parent.addView(label);
     }
     static Spinner spinner(Context c,String[] values) {
-        Spinner s=new Spinner(c,Spinner.MODE_DROPDOWN);ArrayAdapter<String> a=new ArrayAdapter<>(c,android.R.layout.simple_spinner_dropdown_item,values);s.setAdapter(a);
+        Spinner s=new Spinner(c,Spinner.MODE_DROPDOWN);
+        // Rows made here, in the theme's colours taken as the spinner is built. The platform's own row layout drew
+        // nothing at all in the dark windows over the game (the palette is shared, and its item style is not ours).
+        int ink=INK,card=CARD;
+        ArrayAdapter<String> a=new ArrayAdapter<>(c,0,values){
+            private TextView row(int i,View old,boolean drop){
+                TextView t=old instanceof TextView v?v:new TextView(c);
+                t.setText(getItem(i));t.setTextColor(ink);t.setTextSize(15);t.setGravity(Gravity.CENTER_VERTICAL);t.setSingleLine();
+                t.setEllipsize(android.text.TextUtils.TruncateAt.END);t.setMinHeight(dp(c,48));t.setPadding(dp(c,12),0,dp(c,12),0);
+                if(drop)t.setBackgroundColor(card);
+                return t;
+            }
+            @Override public View getView(int i,View v,android.view.ViewGroup parent){return row(i,v,false);}
+            @Override public View getDropDownView(int i,View v,android.view.ViewGroup parent){return row(i,v,true);}
+        };
+        s.setAdapter(a);s.setPopupBackgroundDrawable(rounded(c,card,12));
         s.setMinimumHeight(dp(c,52));s.setBackgroundTintList(android.content.res.ColorStateList.valueOf(ACCENT));return s;
     }
     static void toast(Context c,String text) { Toast.makeText(c,text,Toast.LENGTH_LONG).show(); }
@@ -40,7 +130,39 @@ final class Ui {
         if(launch==null){toast(c,"ウマ娘が見つかりません");return false;}
         c.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));return true;
     }
-    static void show(AlertDialog d,boolean floating) { if(floating)d.getWindow().setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY); d.show(); }
+    static void show(AlertDialog d,boolean floating) { if(floating)d.getWindow().setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY); aboveKeyboard(d); d.show(); }
+    /**
+     * Keeps what is being typed in visible over the keyboard: while the keyboard covers the dialog, the dialog moves
+     * up, gets shorter if moving up is not enough, and scrolls the field into view; it goes back when the keyboard
+     * goes. Needed over the game above all, where the system does not move a window for the keyboard.
+     */
+    static void aboveKeyboard(android.app.Dialog d){
+        var w=d.getWindow();if(w==null)return;
+        w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        View decor=w.getDecorView();int[][] saved={null};
+        decor.setOnApplyWindowInsetsListener((v,insets)->{
+            var p=w.getAttributes();
+            if(!insets.isVisible(android.view.WindowInsets.Type.ime())){
+                if(saved[0]!=null){p.y=saved[0][0];p.height=saved[0][1];saved[0]=null;w.setAttributes(p);}
+                return v.onApplyWindowInsets(insets);
+            }
+            int covered=insets.getInsets(android.view.WindowInsets.Type.ime()).bottom;
+            if(covered>0){
+                if(saved[0]==null)saved[0]=new int[]{p.y,p.height};
+                int[] at=new int[2];decor.getLocationOnScreen(at);
+                int move=Math.min(covered+dp(d.getContext(),8),Math.max(0,at[1]-dp(d.getContext(),32)));
+                int shrink=Math.max(0,covered+dp(d.getContext(),8)-move);
+                boolean top=(p.gravity&Gravity.VERTICAL_GRAVITY_MASK)==Gravity.TOP;
+                // A centred window grows and shrinks around its middle, so shortening it moves its top down by half.
+                p.y-=move+(top?0:shrink/2);
+                if(shrink>0)p.height=Math.max(dp(d.getContext(),160),decor.getHeight()-shrink);
+                w.setAttributes(p);
+            }
+            View focused=decor.findFocus();
+            if(focused!=null)decor.postDelayed(()->focused.requestRectangleOnScreen(new android.graphics.Rect(0,0,focused.getWidth(),focused.getHeight()),false),150);
+            return v.onApplyWindowInsets(insets);
+        });
+    }
     /** Asks for a name, creates the preset and selects it, then runs created (from the app or the floating menu). */
     static void newPreset(Context c,boolean floating,Runnable created) {
         LinearLayout content=column(c);
