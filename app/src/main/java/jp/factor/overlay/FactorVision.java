@@ -40,8 +40,23 @@ final class FactorVision implements AutoCloseable {
     }
     static CardList.Page page(int[] pixels,int width,int height){return page(pixels,width,height,0,height);}
     static CardList.Page page(int[] pixels,int width,int height,int from,int to){
-        return CardList.find(pixels,width,height,CARD_SCAN_X,0,from,to,
-            card->card.x(STARS[2]+STAR_HALF)<width&&stars(pixels,width,height,card)[0]>0);
+        return steady(CardList.find(pixels,width,height,CARD_SCAN_X,0,from,to,
+            card->card.x(STARS[2]+STAR_HALF)<width&&stars(pixels,width,height,card)[0]>0),width);
+    }
+    /**
+     * The list's left edge, the usual card height and the row pitch as shares of the screen width, measured on a
+     * 1080-wide capture (48, 96 and 120px, the same on every row). The game's layout scales with the width, so these
+     * are taken as they are rather than measured again on each frame: measured, they moved by a pixel or two, and
+     * everything placed across a card from them - the name crop, the stars, the letter - moved with them.
+     */
+    static final double LIST_LEFT_X=48/1080.0,CARD_UNIT_X=96/1080.0,PITCH_X=120/1080.0;
+    /** The page found, with its cards' left edge, height unit and pitch fixed to the width; only where they are down the screen is kept. */
+    static CardList.Page steady(CardList.Page page,int width){
+        if(page==null)return null;
+        int left=(int)Math.rint(LIST_LEFT_X*width),unit=(int)Math.rint(CARD_UNIT_X*width);
+        List<CardList.Card> cards=new ArrayList<>();
+        for(CardList.Card c:page.cards())cards.add(new CardList.Card(c.top(),c.bottom(),left,unit));
+        return new CardList.Page(cards,unit,left,(int)Math.rint(PITCH_X*width));
     }
     /**
      * The share of the screen height the factor list lies in, with room to spare. Only these rows (and the

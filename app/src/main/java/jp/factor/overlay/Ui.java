@@ -37,9 +37,10 @@ final class Ui {
         int mode=theme(c);
         if(overlay&&!Store.prefs(c).getBoolean("overlayTheme",true))mode=0;
         if(mode==2)return c;
-        var config=new android.content.res.Configuration(c.getResources().getConfiguration());
-        config.uiMode=(config.uiMode&~android.content.res.Configuration.UI_MODE_NIGHT_MASK)
-            |(mode==1?android.content.res.Configuration.UI_MODE_NIGHT_YES:android.content.res.Configuration.UI_MODE_NIGHT_NO);
+        // Only the night bits overridden: a copy of the whole configuration would fix the screen's bounds and
+        // orientation as they are now, and windows placed with this context would not follow a rotation.
+        var config=new android.content.res.Configuration();
+        config.uiMode=mode==1?android.content.res.Configuration.UI_MODE_NIGHT_YES:android.content.res.Configuration.UI_MODE_NIGHT_NO;
         return c.createConfigurationContext(config);
     }
     static android.graphics.drawable.GradientDrawable rounded(Context c,int color,int radius){
@@ -243,38 +244,45 @@ final class Ui {
         show(d,floating);d.getWindow().setLayout(dp(c,340),-2);
         d.getButton(-1).setOnClickListener(v->{try{saveQr(c,name,parts);toast(c,parts.size()+"枚をギャラリーの「Pictures/因子アシスト」に保存しました");}catch(Exception e){toast(c,"保存できませんでした");}});
     }
-    /** One PNG into Pictures/因子アシスト through MediaStore (no storage permission needed for the app's own files). */
-    static void savePng(Context c,String fileName,byte[] png)throws Exception{
+    /** An image as the app keeps and saves it: WebP, lossless (75: as small as is quick to make; 100 takes long on a tall image). */
+    static byte[] webp(android.graphics.Bitmap b){java.io.ByteArrayOutputStream o=new java.io.ByteArrayOutputStream();b.compress(android.graphics.Bitmap.CompressFormat.WEBP_LOSSLESS,75,o);return o.toByteArray();}
+    /** One image (WebP) into Pictures/因子アシスト through MediaStore (no storage permission needed for the app's own files). */
+    static android.net.Uri saveImage(Context c,String fileName,byte[] image)throws Exception{return saveImage(c,"",fileName,image);}
+    /** The same into a folder under Pictures/因子アシスト (sub: "殿堂入り/…"; empty: the folder itself). */
+    static android.net.Uri saveImage(Context c,String sub,String fileName,byte[] png)throws Exception{
         var resolver=c.getContentResolver();ContentValues values=new ContentValues();
-        values.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME,fileName);values.put(android.provider.MediaStore.Images.Media.MIME_TYPE,"image/png");
-        values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,android.os.Environment.DIRECTORY_PICTURES+"/因子アシスト");values.put(android.provider.MediaStore.Images.Media.IS_PENDING,1);
+        values.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME,fileName);values.put(android.provider.MediaStore.Images.Media.MIME_TYPE,"image/webp");
+        values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,android.os.Environment.DIRECTORY_PICTURES+"/因子アシスト"+(sub.isEmpty()?"":"/"+sub));values.put(android.provider.MediaStore.Images.Media.IS_PENDING,1);
         android.net.Uri uri=resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values);if(uri==null)throw new java.io.IOException("保存先を作れません");
         try(var out=resolver.openOutputStream(uri)){out.write(png);}catch(Exception e){resolver.delete(uri,null,null);throw e;}
         values.clear();values.put(android.provider.MediaStore.Images.Media.IS_PENDING,0);resolver.update(uri,values,null,null);
+        return uri;
     }
-    /** PNGs through MediaStore into Pictures/因子アシスト; the app's own inserts need no storage permission. */
+    /** QR codes (WebP, lossless) through MediaStore into Pictures/因子アシスト; the app's own inserts need no storage permission. */
     static void saveQr(Context c,String name,java.util.List<String> parts)throws Exception{
         String base=name.replaceAll("[\\\\/:*?\"<>|]","_");var resolver=c.getContentResolver();
         for(int i=0;i<parts.size();i++){
             ContentValues values=new ContentValues();
-            values.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME,base+(parts.size()>1?"_QR"+(i+1)+"of"+parts.size():"_QR")+".png");
-            values.put(android.provider.MediaStore.Images.Media.MIME_TYPE,"image/png");
+            values.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME,base+(parts.size()>1?"_QR"+(i+1)+"of"+parts.size():"_QR")+".webp");
+            values.put(android.provider.MediaStore.Images.Media.MIME_TYPE,"image/webp");
             values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,android.os.Environment.DIRECTORY_PICTURES+"/因子アシスト");
             values.put(android.provider.MediaStore.Images.Media.IS_PENDING,1);
             android.net.Uri uri=resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values);
             if(uri==null)throw new java.io.IOException("保存先を作れません");
             // Saved at 8px per module like the PC qr_png, big enough to scan from a screenshot of the saved image.
-            try(var out=resolver.openOutputStream(uri)){QrCodes.bitmap(parts.get(i),QrCodes.modules(parts.get(i)).length*8).compress(android.graphics.Bitmap.CompressFormat.PNG,100,out);}
+            try(var out=resolver.openOutputStream(uri)){QrCodes.bitmap(parts.get(i),QrCodes.modules(parts.get(i)).length*8).compress(android.graphics.Bitmap.CompressFormat.WEBP_LOSSLESS,75,out);}
             catch(Exception e){resolver.delete(uri,null,null);throw e;}
             values.clear();values.put(android.provider.MediaStore.Images.Media.IS_PENDING,0);resolver.update(uri,values,null,null);
         }
     }
     // The factor list for the picker, built once from the bundled umacapture module files (see FactorCatalog).
-    private static FactorCatalog catalog;
+    private static FactorCatalog catalog;private static int catalogFor=-1;
+    /** Made again once new modules are installed (Modules.installed); a list that could not be read is not kept. */
     static synchronized FactorCatalog catalog(Context c) {
-        if(catalog==null){
-            try{catalog=FactorCatalog.parse(assetText(c,"labels.json"),optionalAsset(c,"factor_info.json"),optionalAsset(c,"factor_tag.json"));}
-            catch(Exception e){try{catalog=FactorCatalog.parse("{\"factor.name\":[]}",null,null);}catch(Exception impossible){throw new IllegalStateException(impossible);}}
+        if(catalog==null||catalogFor!=Modules.installed){
+            int now=Modules.installed;
+            try{catalog=FactorCatalog.parse(assetText(c,"labels.json"),optionalAsset(c,"factor_info.json"),optionalAsset(c,"factor_tag.json"));catalogFor=now;}
+            catch(Exception e){try{return FactorCatalog.parse("{\"factor.name\":[]}",null,null);}catch(Exception impossible){throw new IllegalStateException(impossible);}}
         }
         return catalog;
     }

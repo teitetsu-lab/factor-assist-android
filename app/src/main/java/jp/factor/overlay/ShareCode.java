@@ -67,6 +67,8 @@ final class ShareCode {
         collected.put(group+part,p[4]); StringBuilder s=new StringBuilder();
         for(int i=1;i<=total;i++) { String chunk=collected.get(group+i); if(chunk==null)return null; s.append(chunk); }
         if(!hash(s.toString().getBytes(StandardCharsets.US_ASCII)).equals(p[1]))throw new IOException("QRの内容が一致しません");
+        // Whole: this group's parts are done with; any other group being collected stays.
+        collected.keySet().removeIf(k->k.startsWith(group));
         return s.toString();
     }
 }

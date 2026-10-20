@@ -15,8 +15,14 @@ final class FactorFrames {
      * met is false when the factor is registered but has too few stars; its colour then starts half grey.
      * label is drawn in the empty strip under the skill name - what the app read, and what it is worth - so the
      * reading can be checked against the screen without opening anything.
+     * side, when not WHOLE, is a second colour the frame turns into towards its right edge (the left the frame's own,
+     * or nothing when it has none).
      */
-    record Mark(int y,int priority,boolean met,String label,int[] box,int top,String tag,String rank) {
+    record Mark(int y,int priority,boolean met,String label,int[] box,int top,String tag,String rank,int price,int side) {
+        Mark(int y,int priority,boolean met,String label,int[] box,int top,String tag,String rank,int price){this(y,priority,met,label,box,top,tag,rank,price,WHOLE);}
+        Mark(int y,int priority,boolean met,String label,int[] box,int top,String tag,String rank){this(y,priority,met,label,box,top,tag,rank,PRICE_NONE);}
+        Mark withPrice(int state){return new Mark(y,priority,met,label,box,top,tag,rank,state,side);}
+        Mark withSide(int s){return new Mark(y,priority,met,label,box,top,tag,rank,price,s);}
         Mark(int y,int priority,boolean met){this(y,priority,met,null,null,WHOLE,null,null);}
         Mark(int y,int priority,boolean met,String label){this(y,priority,met,label,null,WHOLE,null,null);}
         Mark(int y,int priority,boolean met,String label,int[] box){this(y,priority,met,label,box,WHOLE,null,null);}
@@ -33,17 +39,18 @@ final class FactorFrames {
      */
     static final int WHOLE=Integer.MIN_VALUE;
     /**
-     * Shared as the whole screen, a factor row gets no frame - its lines would cross the column the list is found
-     * by (.057) - but its level as a large letter left of the stars: clear of the name crop (to 5.1 card units)
-     * and of the stars (from 8.1), so nothing read is drawn on. Its place is found as the stars' is, from the list's
-     * left edge and the page's usual card height, the same for every row; each card's own height made it wander,
-     * as the coloured cards are taller. LETTER_X is the fallback share of the width when there are no cards.
+     * price of a skill Mark: the price read for the row, shown by its price box as ✓140pt in green, or ? 未読 in
+     * grey while none is read (a skill without a price is left out of the plan). NONE draws nothing.
      */
-    static final double LETTER_X=.716;
-    /** Where the level letters go across the screen on this page (DrawPlaces.letterUnits); a factor snapshot keeps it as its labelX. */
-    static int letterX(FactorVision.Layout layout,int width){
-        return layout.cards()!=null&&!layout.cards().isEmpty()?layout.cards().get(0).x(DrawPlaces.current.letterUnits):(int)Math.rint(width*LETTER_X);
-    }
+    static final int PRICE_NONE=Integer.MIN_VALUE,PRICE_UNKNOWN=-1;
+    /**
+     * Shown as 「★の左に文字」, a factor row gets no frame - its lines would cross the column the list is found
+     * by (.057) - but its level as a large letter left of the stars: clear of the name crop (to 5.1 card units)
+     * and of the stars (from 8.1), so nothing read is drawn on. Its place across is a share of the screen width
+     * (DrawPlaces.letterX): worked out from each card's height, or even the page's, it wandered by a pixel or two.
+     */
+    /** Where the level letters go across the screen; a factor snapshot keeps it as its labelX. */
+    static int letterX(FactorVision.Layout layout,int width){return (int)Math.rint(width*DrawPlaces.current.letterX);}
     /** A level as the result window writes it: 必/重/要/本 for a plain preset, 0-7 for a detailed one; null for none. */
     static String levelTag(int level,boolean detailed){
         if(level<0||level>Store.PRIORITY_MAX)return null;
@@ -80,7 +87,7 @@ final class FactorFrames {
         for(int i=0;i<ys.size();i++){
             int y=ys.get(i);
             for(Mark m:last.marks())if(Math.abs(y-move-m.y())<pitch/4){
-                moved.add(new Mark(y,m.priority(),m.met(),m.label(),boxes==null?null:boxes.get(i),m.top(),m.tag(),m.rank()));break;
+                moved.add(new Mark(y,m.priority(),m.met(),m.label(),boxes==null?null:boxes.get(i),m.top(),m.tag(),m.rank(),m.price(),m.side()));break;
             }
         }
         return new Snapshot(width,height,moved,rowHalf,labelX);
@@ -133,7 +140,9 @@ final class FactorFrames {
         private final Runnable poll=new Runnable(){public void run(){
             Snapshot now=visible()?CaptureService.frames:null;boolean hide=now==null;
             if(now!=drawn||hide!=hidden){drawn=now;hidden=hide;invalidate();}
-            postDelayed(this,16);
+            // Every frame of the screen while frames are drawn, so they keep up with the list; with nothing to draw
+            // (paused, off the lists) a tenth of a second is soon enough, and the phone is not woken 60 times a second.
+            postDelayed(this,now!=null&&!now.marks().isEmpty()?16:100);
         }};
         private final Paint text=new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Rect bounds=new Rect();
@@ -142,6 +151,11 @@ final class FactorFrames {
         // The label's look is settable. The window is kept, not rebuilt, when the settings change: a window added
         // again lands on top of the floating menu and the dialogs, so it is added once and only told to reload.
         private int labelColor,labelOutline;private float labelSize,labelWidth,labelDrop,labelShift;
+        /**
+         * The unit of the sideways nudge set in 表示設定 (nameTextShift, in hundredths): a share of the screen width, the
+         * size a row half has on the S25 (72 of 1080). Taken from the row height it moved with it, a pixel or two a frame.
+         */
+        static final float SHIFT_UNIT=72/1080f;
         Overlay(Context c){super(c);paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(Ui.dp(c,5));
             text.setStyle(Paint.Style.FILL);text.setFakeBoldText(true);
             reload();
@@ -166,6 +180,30 @@ final class FactorFrames {
         }
         static boolean visible(){return CaptureService.running&&CaptureService.contentVisible;}
         private final Paint badge=new Paint(Paint.ANTI_ALIAS_FLAG),badgeText=new Paint(Paint.ANTI_ALIAS_FLAG);
+        /**
+         * The price read for the row (see PRICE_*), as a small pill on the top right corner of the game's price box:
+         * placed as the reading places that box, from the icon's edge and the row pitch (shares of the width).
+         */
+        void priceBox(Canvas canvas,Snapshot s,Mark m){
+            if(m.price()==PRICE_NONE)return;
+            float w=s.frameWidth(),pitch=(float)(SkillVision.PITCH_X*w),icon=(float)(SkillVision.ICON_RIGHT_X*w);
+            pricePill(canvas,m,icon+(float)SkillVision.PT_R*pitch+pitch*.16f,m.y()+(float)SkillVision.PT_T*pitch,pitch*.22f);
+        }
+        /** The pill itself, its right edge at right and centred on y, h tall; its width. */
+        float pricePill(Canvas canvas,Mark m,float right,float y,float h){
+            boolean read=m.price()!=PRICE_UNKNOWN;String text=read?"✓"+m.price()+"pt":"? 未読";
+            badgeText.setTextSize(h*.66f);badgeText.setFakeBoldText(true);badgeText.setTextAlign(Paint.Align.CENTER);
+            float width=badgeText.measureText(text)+h*.7f;RectF r=new RectF(right-width,y-h/2,right,y+h/2);
+            badge.setColor(0xffffffff);canvas.drawRoundRect(new RectF(r.left-h*.08f,r.top-h*.08f,r.right+h*.08f,r.bottom+h*.08f),h,h,badge);
+            badge.setColor(read?0xff2ebe6e:0xff969696);canvas.drawRoundRect(r,h,h,badge);
+            badgeText.setColor(0xffffffff);canvas.drawText(text,r.centerX(),y-(badgeText.descent()+badgeText.ascent())/2,badgeText);
+            return width;
+        }
+        float pricePillWidth(Mark m,float h){
+            if(m.price()==PRICE_NONE)return 0;
+            badgeText.setTextSize(h*.66f);badgeText.setFakeBoldText(true);
+            return badgeText.measureText(m.price()!=PRICE_UNKNOWN?"✓"+m.price()+"pt":"? 未読")+h*.7f;
+        }
         /** The tag and the rank of a mark, as small filled labels sitting on the frame's left corners. */
         void corners(Canvas canvas,Mark m,RectF box){
             float h=box.height()*.3f;
@@ -174,7 +212,7 @@ final class FactorFrames {
         }
         private final Paint line=new Paint(Paint.ANTI_ALIAS_FLAG);
         /**
-         * The skill screen shared as the whole screen: in place of the frame, the grey line under the name is drawn
+         * The skill screen shown as 「名前の下に線」: in place of the frame, the grey line under the name is drawn
          * over in the frame's colours, left (top when split) to right (bottom), with the tag at its left end and the
          * rank at its right, both on the line and short of the pentagonal - button. The line keeps clear of the name,
          * of the line under it and of the column the list is found by.
@@ -184,8 +222,10 @@ final class FactorFrames {
             DrawPlaces at=DrawPlaces.current;float half=s.rowHalf();
             float y=box.top+half*(float)at.lineY,thick=half*.12f,h=half*(float)at.badge;
             float left=(float)(at.lineStart*s.frameWidth()),right=(float)(at.lineEnd*s.frameWidth());
+            // Right to left at the line's end: the price read (the price box itself is read, so it goes here), then the number.
+            float priceWidth=pricePillWidth(m,h),priceGap=priceWidth>0?priceWidth+h*.2f:0;
             float tagWidth=m.tag()!=null?labelWidth(m.tag(),h):0,rankWidth=m.rank()!=null?labelWidth(m.rank(),h):0;
-            float from=left+(tagWidth>0?tagWidth+h*.2f:0),to=right-(rankWidth>0?rankWidth+h*.2f:0);
+            float from=left+(tagWidth>0?tagWidth+h*.2f:0),to=right-priceGap-(rankWidth>0?rankWidth+h*.2f:0);
             int start,end;
             if(m.top()!=WHOLE){int top=color(m.top());start=top!=0?top:color&0xffffff;end=color!=0?color:top&0xffffff;}
             else{start=color;end=color;}
@@ -195,14 +235,15 @@ final class FactorFrames {
                 canvas.drawRoundRect(new RectF(from,y-thick/2,to,y+thick/2),thick/2,thick/2,line);line.setShader(null);
             }
             if(m.tag()!=null){int c=color(m.top()!=WHOLE?m.top():m.priority());label(canvas,m.tag(),left,y-h/2,h,c!=0?c:GREY);}
-            if(m.rank()!=null)label(canvas,m.rank(),right-rankWidth,y-h/2,h,RAINBOW[0]);
+            if(m.rank()!=null)label(canvas,m.rank(),right-priceGap-rankWidth,y-h/2,h,RAINBOW[0]);
+            if(priceWidth>0)pricePill(canvas,m,right,y,h);
         }
         private final Paint letter=new Paint(Paint.ANTI_ALIAS_FLAG);
         /** A factor's level written large left of its stars, in its frame's colour (grey when short of stars). */
         void dotLetter(Canvas canvas,Snapshot s,Mark m){
             if(m.tag()==null)return;
             int c=m.met()?color(m.priority()):GREY;if(c==0)return;
-            float size=s.frameWidth()*(float)DrawPlaces.current.letterSize,x=s.labelX()>0?s.labelX():s.frameWidth()*(float)LETTER_X,y=m.y();
+            float size=s.frameWidth()*(float)DrawPlaces.current.letterSize,x=s.labelX()>0?s.labelX():s.frameWidth()*(float)DrawPlaces.current.letterX,y=m.y();
             letter.setTextSize(size);letter.setTextScaleX(1f);letter.setFakeBoldText(true);letter.setTextAlign(Paint.Align.CENTER);
             float base=y-(letter.descent()+letter.ascent())/2;
             letter.setStyle(Paint.Style.STROKE);letter.setStrokeWidth(size*.16f);letter.setColor(Color.WHITE);canvas.drawText(m.tag(),x,base,letter);
@@ -234,7 +275,7 @@ final class FactorFrames {
                     // Left-aligned with the skill's own name: the first glyph's ink, not the pen, starts where the
                     // game's name does (labelX).
                     text.getTextBounds(m.label(),0,1,bounds);
-                    float x=s.labelX()-bounds.left+s.rowHalf()*labelShift,y=m.y()+s.rowHalf()*labelDrop;
+                    float x=s.labelX()-bounds.left+s.frameWidth()*SHIFT_UNIT*labelShift,y=m.y()+s.rowHalf()*labelDrop;
                     if(labelWidth>0){
                         text.setColor(labelOutline);text.setStyle(Paint.Style.STROKE);text.setStrokeWidth(s.rowHalf()*labelWidth);
                         canvas.drawText(m.label(),x,y,text);
@@ -244,16 +285,21 @@ final class FactorFrames {
                 }
                 int color=color(m.priority());
                 RectF box=chip(s,m);
-                // A letter or a line instead of the frame: chosen in the settings, and always when the whole screen is
-                // shared - what is drawn here is then captured and read too, and a frame would cross the one column
-                // each list is found by (FactorVision/SkillVision.CARD_SCAN_X).
+                // A letter or a line instead of the frame, as chosen in the settings.
                 boolean skillRow=s.rowHalf()>0;
-                if(CaptureService.wholeScreen||(skillRow?skillLines:factorLetters)){
+                if(skillRow?skillLines:factorLetters){
                     if(skillRow){underline(canvas,s,m,box,color);continue;}
                     dotLetter(canvas,s,m);continue;
                 }
                 // The corner labels are the skill screen's; a factor row's level is only written on its dot (above).
-                if(s.rowHalf()>0)corners(canvas,m,box);
+                if(s.rowHalf()>0){corners(canvas,m,box);priceBox(canvas,s,m);}
+                if(m.side()!=WHOLE){
+                    // Two colours, left to right: the frame's own into the second; with none of its own, the second fades in.
+                    int right=color(m.side());if(right==0&&color==0)continue;
+                    int from=color!=0?color:right&0xffffff,to=right!=0?right:color&0xffffff;
+                    paint.setColor(0xff000000);paint.setShader(new LinearGradient(box.left,box.top,box.right,box.top,from,to,Shader.TileMode.CLAMP));
+                    canvas.drawRoundRect(box,12,12,paint);continue;
+                }
                 if(m.top()!=WHOLE){
                     // Two colours, top to bottom, blended all the way down; a missing one is its partner faded out.
                     int top=color(m.top());if(top==0&&color==0)continue;

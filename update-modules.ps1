@@ -5,14 +5,17 @@ param([string]$Modules = "$env:APPDATA\umasagashi\umacapture\modules")
 $ErrorActionPreference = 'Stop'
 $assets = Join-Path $PSScriptRoot 'app\src\main\assets'
 
-# modules path -> asset name. factor.onnx / factor_rank.onnx / labels.json must always move together:
-# the model's output index is a position in labels.json factor.name.
+# modules path -> asset name. factor.onnx / factor_rank.onnx / skill.onnx / labels.json must always move together:
+# each model's output index is a position in labels.json (factor.name, skill.name).
 $files = [ordered]@{
     'factor\prediction.onnx'      = 'factor.onnx'
     'factor_rank\prediction.onnx' = 'factor_rank.onnx'
     'labels.json'                 = 'labels.json'
     'factor_info.json'            = 'factor_info.json'
     'factor_tag.json'             = 'factor_tag.json'
+    'skill\prediction.onnx'       = 'skill.onnx'
+    'skill_info.json'             = 'skill_info.json'
+    'skill_tag.json'              = 'skill_tag.json'
     'license.md'                  = 'umacapture-modules-LICENSE.md'
     'version_info.json'           = 'umacapture-modules-version.json'
 }

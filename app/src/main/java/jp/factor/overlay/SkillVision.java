@@ -200,8 +200,8 @@ final class SkillVision implements AutoCloseable {
         return byCards!=null?byCards:detectByAnchors(pixels,width,height);
     }
 
-    /** Where a row's reference points sit on its card, in units of the card height (measured on the phone: a card 161px tall). */
-    static final double CARD_ICON_RIGHT=.82, CARD_ROW_Y=.524;
+    /** Where a row's centre sits on its card, in units of the card height (measured on the phone: a card 161px tall). */
+    static final double CARD_ROW_Y=.524;
     /**
      * The skill list the way the factor list is read: the cards' own edges, then every crop at a fixed place on
      * its card. Only the column at CARD_SCAN_X is looked at, instead of hunting the whole screen for icons and +
@@ -218,23 +218,22 @@ final class SkillVision implements AutoCloseable {
     static Layout fromCards(int[] pixels,int width,int height){return fromCards(pixels,width,height,0,height);}
     /** The skill rows from the cards in rows from..to only; null when fewer than two cards are there. */
     static Layout fromCards(int[] pixels,int width,int height,int from,int to){
-        // The pitch is needed to place the + button before the page is known: the usual gap between card tops.
-        List<int[]> runs=CardList.edges(pixels,width,height,(int)Math.rint(CARD_SCAN_X*width),from,to);
-        if(runs.size()<2)return null;
-        List<Integer> heights=new ArrayList<>(),steps=new ArrayList<>();
-        for(int[] run:runs)heights.add(run[1]-run[0]);
-        for(int i=1;i<runs.size();i++)steps.add(runs.get(i)[0]-runs.get(i-1)[0]);
-        int unit=FactorVision.median(heights),pitch=FactorVision.median(steps);
+        if(CardList.edges(pixels,width,height,(int)Math.rint(CARD_SCAN_X*width),from,to).size()<2)return null;
+        // The row pitch is a share of the screen width (184 of 1080), not re-measured: everything across a row and
+        // the frames' labels are sized from it, and measured it moved by a pixel or two from frame to frame.
+        int pitch=(int)Math.rint(PITCH_X*width);
         int listTop=height>width?(int)(height*LIST_TOP):0;
         // A skill card is one with its + button where it should be, or 獲得済 in its price box.
         CardList.Page page=CardList.find(pixels,width,height,CARD_SCAN_X,0,from,to,card->{
-            int iconRight=card.x(CARD_ICON_RIGHT),y=card.y(CARD_ROW_Y);
+            int iconRight=(int)Math.rint(ICON_RIGHT_X*width),y=card.y(CARD_ROW_Y);
             if(y<listTop||!FactorVision.inside(nameBox(iconRight,pitch,y),width,height))return false;
             return plusAt(pixels,width,height,(int)Math.rint(iconRight+PLUS_TO_ICON_RIGHT*pitch),y,pitch)
                 ||acquired(pixels,width,height,ptBox(iconRight,pitch,y));
         });
         if(page==null)return null;
-        int iconRight=(int)Math.rint(page.left()+CARD_ICON_RIGHT*unit);
+        // Across, the game's layout is fixed to the screen width: the icon's edge is a fraction of it rather than
+        // worked out from this frame's card heights, which moved it by a pixel or two from frame to frame.
+        int iconRight=(int)Math.rint(ICON_RIGHT_X*width);
         List<Integer> ys=new ArrayList<>();List<int[]> frames=new ArrayList<>();
         for(CardList.Card card:page.cards()){ys.add(card.y(CARD_ROW_Y));frames.add(card.frame(width));}
         return new Layout(pitch,iconRight,ys,frames);
@@ -335,14 +334,16 @@ final class SkillVision implements AutoCloseable {
             int first=centres.get(0),last=centres.get(centres.size()-1);
             int listTop=height>width?(int)(height*LIST_TOP):0;
             int listBottom=height>width?(int)(height*LIST_BOTTOM):height;
+            // The icon's right edge, also when the rows were found by their + buttons (the name box is measured from it).
+            int from=nameFrom(rights,pitch,fromPlus);
             for(int y=first-pitch*2;y<=last+pitch*2;y+=pitch){
                 if(y<listTop||y>listBottom)continue;
-                int[] box=nameBox(FactorVision.median(rights),pitch,y);
+                int[] box=nameBox(from,pitch,y);
                 if(!FactorVision.inside(box,width,height))continue;
                 ys.add(y);
             }
             if(ys.size()<2)continue;
-            if(best==null||ys.size()>best.ys().size())best=new Layout(pitch,nameFrom(rights,pitch,fromPlus),ys);
+            if(best==null||ys.size()>best.ys().size())best=new Layout(pitch,from,ys);
         }
         return best;
     }
@@ -361,9 +362,11 @@ final class SkillVision implements AutoCloseable {
         return fromPlus?(int)Math.rint(x-PLUS_TO_ICON_RIGHT*pitch):x;
     }
 
-    /** Where the game starts writing a skill's name: the line drawn under it starts there too. */
-    static final double NAME_TEXT_L=.174;
-    static int textLeft(int iconRight,int pitch){return (int)Math.rint(iconRight+NAME_TEXT_L*pitch);}
+    /**
+     * The right edge of the skill icon, as a share of the screen width (the game's layout does not move sideways;
+     * measured on a 1080-wide capture). What is read on a row is placed from it.
+     */
+    static final double ICON_RIGHT_X=180/1080.0,PITCH_X=184/1080.0;
     /** The name box of one row: to the right of the icon, slightly above its centre (PC R_NAME_*). */
     static int[] nameBox(int iconRight,int pitch,int y) {
         int centre=(int)Math.rint(y+NAME_CY*pitch),half=(int)Math.rint(NAME_H*pitch/2);
@@ -454,9 +457,10 @@ final class SkillVision implements AutoCloseable {
      * 川崎レース場○ as 川崎レース場◎ with full confidence. A name ending in either is therefore settled by the
      * symbol itself, at full resolution; when it says the other one, and that skill exists, the name is changed.
      */
-    String ringChecked(int[] pixels,int width,int height,Layout layout,int y,String name){
+    String ringChecked(int[] pixels,int width,int height,Layout layout,int y,String name){return ringChecked(pixels,width,height,nameBox(layout.iconRight(),layout.pitch(),y),name);}
+    String ringChecked(int[] pixels,int width,int height,int[] box,String name){
         if(!name.endsWith("○")&&!name.endsWith("◎"))return name;
-        char seen=ringAtEnd(pixels,width,height,nameBox(layout.iconRight(),layout.pitch(),y));
+        char seen=ringAtEnd(pixels,width,height,box);
         if(seen==0||name.charAt(name.length()-1)==seen)return name;
         String other=byText.get(Store.normalize(name.substring(0,name.length()-1)+seen));
         return other!=null?other:name;
@@ -482,6 +486,7 @@ final class SkillVision implements AutoCloseable {
         int textHeight=bottom-top+1,left=Math.max(0,right-textHeight-1),mid=(top+bottom)/2;
         List<Integer> crossings=new ArrayList<>();
         for(int y=mid-1;y<=mid+1;y++){
+            if(y<0||y>=bh)continue;   // ink on the box's top or bottom row only: the row beyond it is not there
             int runs=0;boolean was=false;
             for(int x=left;x<=right;x++){boolean on=ink[y*bw+x];if(on&&!was)runs++;was=on;}
             crossings.add(runs);

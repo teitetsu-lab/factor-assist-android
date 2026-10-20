@@ -46,7 +46,12 @@ final class ResultHistory {
         out.sort((a,b)->Long.compare(b.time(),a.time()));return out;
     }
     private static synchronized void add(Context c,Entry entry){
-        List<Entry> kept=all(c);kept.add(entry);
+        List<Entry> kept=all(c);
+        // The same results kept already (put back from the history, then saved again on the way out): not twice,
+        // or the copies push the older results out.
+        String already=entry.data().toString();
+        for(Entry e:kept)if(e.mode().equals(entry.mode())&&e.data().toString().equals(already))return;
+        kept.add(entry);
         // The oldest of each mode go first once there are more than KEEP of it.
         for(String mode:new String[]{Store.FACTOR,Store.SKILL}){
             List<Entry> same=new ArrayList<>();for(Entry e:kept)if(e.mode().equals(mode))same.add(e);
@@ -56,27 +61,37 @@ final class ResultHistory {
         try{
             JSONArray out=new JSONArray();
             for(Entry e:kept)out.put(new JSONObject().put("time",e.time()).put("mode",e.mode()).put("data",e.data()));
-            Files.write(file(c).toPath(),out.toString().getBytes(StandardCharsets.UTF_8));
+            // Written aside and moved over, so a write cut short never leaves a file that loses every result.
+            java.io.File to=file(c),part=new java.io.File(to.getPath()+".part");
+            Files.write(part.toPath(),out.toString().getBytes(StandardCharsets.UTF_8));
+            Files.move(part.toPath(),to.toPath(),java.nio.file.StandardCopyOption.REPLACE_EXISTING,java.nio.file.StandardCopyOption.ATOMIC_MOVE);
         }catch(Exception ignored){}
     }
 
     /** Saves what the mode has read now, unless it has read nothing. */
     static void save(Context c,String mode){
         try{
-            JSONObject data=new JSONObject();
-            if(Store.SKILL.equals(mode)){
-                var skills=CaptureService.skillsInOrder();if(skills.isEmpty())return;
-                JSONArray list=new JSONArray();
-                for(var s:skills)list.put(new JSONObject().put("name",s.name()).put("pt",s.pt()).put("acquired",s.acquired()));
-                data.put("skills",list).put("ownedPt",CaptureService.ownedPt);
-            }else{
-                var pages=CaptureService.snapshot();if(pages.isEmpty())return;
-                JSONObject out=new JSONObject();
-                for(var page:pages.entrySet())out.put(page.getKey(),new JSONObject(page.getValue()));
-                data.put("pages",out);
-            }
-            add(c,new Entry(System.currentTimeMillis(),mode,data));
+            if(Store.SKILL.equals(mode)?CaptureService.skillsInOrder().isEmpty():CaptureService.snapshot().isEmpty())return;
+            add(c,new Entry(System.currentTimeMillis(),mode,data(mode)));
         }catch(Exception ignored){}
+    }
+    /**
+     * What the mode holds now, as kept. With where each row sits in its page (PagePlaces, a skill's place), so a
+     * result put back is listed in the game's order again.
+     */
+    private static JSONObject data(String mode)throws org.json.JSONException{
+        JSONObject data=new JSONObject();
+        if(Store.SKILL.equals(mode)){
+            JSONArray list=new JSONArray();
+            for(var s:CaptureService.skillsInOrder())list.put(new JSONObject().put("name",s.name()).put("pt",s.pt()).put("acquired",s.acquired()).put("place",s.place()));
+            data.put("skills",list).put("ownedPt",CaptureService.ownedPt);
+        }else{
+            JSONObject out=new JSONObject(),at=new JSONObject();
+            for(var page:CaptureService.snapshot().entrySet())out.put(page.getKey(),new JSONObject(page.getValue()));
+            for(var page:CaptureService.places.copy().entrySet())if(out.has(page.getKey()))at.put(page.getKey(),new JSONObject(page.getValue()));
+            data.put("pages",out).put("places",at);
+        }
+        return data;
     }
 
     /**
@@ -94,19 +109,7 @@ final class ResultHistory {
         return null;
     }
     private static String current(String mode){
-        try{
-            JSONObject data=new JSONObject();
-            if(Store.SKILL.equals(mode)){
-                JSONArray list=new JSONArray();
-                for(var s:CaptureService.skillsInOrder())list.put(new JSONObject().put("name",s.name()).put("pt",s.pt()).put("acquired",s.acquired()));
-                data.put("skills",list).put("ownedPt",CaptureService.ownedPt);
-            }else{
-                JSONObject out=new JSONObject();
-                for(var page:CaptureService.snapshot().entrySet())out.put(page.getKey(),new JSONObject(page.getValue()));
-                data.put("pages",out);
-            }
-            return data.toString();
-        }catch(Exception e){return "";}
+        try{return data(mode).toString();}catch(Exception e){return "";}
     }
 
     /** The saved result as text, for looking at before putting it back. */

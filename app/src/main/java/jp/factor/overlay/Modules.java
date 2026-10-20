@@ -18,6 +18,8 @@ import org.json.JSONObject;
  */
 final class Modules {
     static final String ZIP="modules.zip", VERSION="version_info.json";
+    /** Counts the module sets installed while the process runs: a running capture loads them again on its next start. */
+    static volatile int installed;
     /** Asset name → the file's path inside umacapture's modules.zip. */
     static final Map<String,String> FILES;
     static {

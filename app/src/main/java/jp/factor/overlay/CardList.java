@@ -28,8 +28,12 @@ final class CardList {
         int y(double units){return (int)Math.rint(top+units*unit);}
         /** A box on the card, {left, top, right, bottom} in frame pixels, from its edges in card units. */
         int[] box(double left,double top,double right,double bottom){return new int[]{x(left),y(top),x(right),y(bottom)};}
-        /** The card itself as {left, top, right, bottom}, for drawing a frame along its border; the list is centred. */
-        int[] frame(int width){return new int[]{left,top,width-left,bottom};}
+        /**
+         * The card itself as {left, top, right, bottom}, for drawing a frame along its border. Across it is fixed to
+         * the screen width (DrawPlaces.frameX, the list centred), as everything drawn over the game is; only top
+         * and bottom come from this card, as the list scrolls.
+         */
+        int[] frame(int width){int l=(int)Math.rint(DrawPlaces.current.frameX*width);return new int[]{l,top,width-l,bottom};}
     }
     /** The cards wholly on screen, and what they share: the usual card height, the list's left edge, the row pitch. */
     record Page(List<Card> cards,int unit,int left,int pitch) {}

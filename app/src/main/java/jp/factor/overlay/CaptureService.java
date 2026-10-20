@@ -58,6 +58,11 @@ public class CaptureService extends Service {
     /** What the plan says to buy: framed on screen until it is bought or the plan is worked out again. */
     static volatile Set<String> planned=Set.of();
     static boolean skillMode(Context c){return Store.SKILL.equals(Store.prefs(c).getString("mode",Store.FACTOR));}
+    /**
+     * The ○ a ◎ row stands for, else null: the row shows ◎ once its ○ is bought, and the ○ read before is dropped
+     * from the list (readSkills), so it is owned without a row of its own.
+     */
+    static String circleOf(String name){String n=name.trim();return n.endsWith("◎")?n.substring(0,n.length()-1)+"○":null;}
     static synchronized List<Skill> skillsInOrder(){
         List<Skill> all=new ArrayList<>(skills.values());
         all.sort(Comparator.comparingInt(Skill::place));
@@ -69,11 +74,12 @@ public class CaptureService extends Service {
      * Clears one mode's results only: factors and skills are kept apart, so switching modes - by hand or by
      * itself - or resetting one never touches the other (see ResultHistory, which saves them first).
      */
+    /** Whether a mode has read anything yet. */
+    static synchronized boolean hasResults(String mode){return Store.SKILL.equals(mode)?!skills.isEmpty():!results.isEmpty();}
     static synchronized void resetResults(String mode){
         resultGeneration++;
-        if(Store.SKILL.equals(mode)){skills.clear();visibleSkills=List.of();planned=Set.of();planRanks=Map.of();planLevels=Map.of();rankReach=null;ownedPt=-1;}
-        else{results.clear();places.clear();
-        }
+        if(Store.SKILL.equals(mode)){skills.clear();skillPlaces.clear();visibleSkills=List.of();planned=Set.of();planRanks=Map.of();planLevels=Map.of();planSpent=null;ownedPt=-1;}
+        else{results.clear();places.clear();}
     }
     /** Told when the mode switched by itself, to rebuild the menu and say so on screen. */
     static volatile Runnable modeSwitched;
@@ -85,16 +91,19 @@ public class CaptureService extends Service {
      * decide it - each is found on its own screen and not on the other (ScreenKindTest); the older whole-frame
      * factor detection also fires on the skill screen, so it has no say. The other screen has to be seen
      * SWITCH_AFTER frames in a row while this mode's own cards are not, so a passing likeness does not switch it.
-     * pixels holds the whole frame here whenever this mode's cards were missing. True when it switched.
+     * True when it switched.
      */
-    boolean autoSwitch(int w,int h,boolean skill,boolean cards){
+    boolean autoSwitch(Bitmap frame,int w,int h,boolean skill,boolean cards){
         if(cards||!Store.prefs(this).getBoolean("autoMode",true)){sightings=0;return false;}
+        // Only this mode's list rows are copied each cycle: the other screen's rows are copied here, when looked for.
+        if(skill)copyRows(frame,w,(int)(h*FactorVision.LIST_TOP),(int)(h*FactorVision.LIST_BOTTOM));
+        else copyRows(frame,w,(int)(h*SkillVision.COPY_TOP),(int)(h*SkillVision.COPY_BOTTOM));
         boolean other=skill?FactorVision.detectCards(pixels,w,h,(int)(h*FactorVision.LIST_TOP),(int)(h*FactorVision.LIST_BOTTOM))!=null
                            :SkillVision.fromCards(pixels,w,h,(int)(h*SkillVision.COPY_TOP),(int)(h*SkillVision.COPY_BOTTOM))!=null;
         sightings=other?sightings+1:0;
         if(sightings<SWITCH_AFTER)return false;
         sightings=0;
-        // The results of both modes stay as they are: only which one is read changes.
+        // The mode switched to starts afresh (see FloatingService: its results go to the history first).
         Store.prefs(this).edit().putString("mode",skill?Store.FACTOR:Store.SKILL).commit();
         frames=null;candidate="";stable=0;confirmations.clear();settle.forget();skillHits.clear();skillTop=Integer.MIN_VALUE;
         Runnable told=modeSwitched;if(told!=null)told.run();
@@ -106,13 +115,21 @@ public class CaptureService extends Service {
         if(Store.SKILL.equals(mode)){
             org.json.JSONArray list=data.optJSONArray("skills");
             for(int i=0;list!=null&&i<list.length();i++){org.json.JSONObject s=list.optJSONObject(i);
-                skills.put(s.optString("name"),new Skill(s.optString("name"),s.optInt("pt",-1),s.optBoolean("acquired"),i));}
+                skills.put(s.optString("name"),new Skill(s.optString("name"),s.optInt("pt",-1),s.optBoolean("acquired"),s.optInt("place",i)));}
+            // Kept with places (newer history): they go back to the list's places too, so rows read on fit in.
+            Map<String,Integer> at=new HashMap<>();boolean placed=false;
+            for(int i=0;list!=null&&i<list.length();i++){org.json.JSONObject s=list.optJSONObject(i);if(s.has("place")){placed=true;at.put(s.optString("name"),s.optInt("place"));}}
+            if(placed)skillPlaces.set(Store.SKILL,at);
             ownedPt=data.optInt("ownedPt",-1);
         }else{
             org.json.JSONObject pages=data.optJSONObject("pages");
             if(pages!=null)for(Iterator<String> i=pages.keys();i.hasNext();){String page=i.next();org.json.JSONObject f=pages.optJSONObject(page);
                 Map<String,Integer> bag=new LinkedHashMap<>();for(Iterator<String> n=f.keys();n.hasNext();){String name=n.next();bag.put(name,f.optInt(name));}
                 results.put(page,bag);}
+            org.json.JSONObject at=data.optJSONObject("places");
+            if(at!=null)for(Iterator<String> i=at.keys();i.hasNext();){String page=i.next();org.json.JSONObject f=at.optJSONObject(page);if(f==null)continue;
+                Map<String,Integer> where=new HashMap<>();for(Iterator<String> n=f.keys();n.hasNext();){String name=n.next();where.put(name,f.optInt(name));}
+                places.set(page,where);}
         }
     }
     static synchronized Map<String,Map<String,Integer>> snapshot(){
@@ -226,6 +243,16 @@ public class CaptureService extends Service {
     final HandlerThread captureThread=new HandlerThread("FactorCapture");
     Handler handler;
     final ExecutorService worker=Executors.newSingleThreadExecutor();
+    /** Modules.installed when the models were loaded. */
+    private int modelsLoaded=Modules.installed;
+    /** Worker only: the models closed, to be loaded again when next needed. */
+    void closeModels(){
+        activeVision=null;activeRunner=null;
+        if(vision!=null)try{vision.close();}catch(Exception ignored){}vision=null;
+        if(skillVision!=null)skillVision.close();skillVision=null;
+    }
+    /** Runs on the worker unless the capture has ended: a callback arriving after onDestroy finds it shut down. */
+    void onWorker(Runnable r){if(closed)return;try{worker.execute(r);}catch(java.util.concurrent.RejectedExecutionException ignored){}}
     MediaProjection projection;VirtualDisplay display;ImageReader reader;TextRecognizer headerReader;FactorVision vision;
     boolean busy=false;volatile boolean closed=false,paused=false,freshStart=false;long last=0;int width,height;String candidate="";int stable=0;
     final Map<String,Integer> confirmations=new HashMap<>();
@@ -243,7 +270,7 @@ public class CaptureService extends Service {
     /** Set by the worker when confident rows are still one read short of confirmation. */
     volatile boolean recheck;
     /** Stops new cycles; the one in progress still finishes, but registers nothing (see process). */
-    void pauseNow(){if(projection!=null&&!paused){paused=true;running=false;frames=null;message="一時停止中";handler.post(()->{handler.removeCallbacks(pumpTask);releaseHeld();recheck=false;if(display!=null)display.setSurface(null);});}}
+    void pauseNow(){if(projection!=null&&!paused){paused=true;running=false;frames=null;message="一時停止中";handler.post(()->{handler.removeCallbacks(pumpTask);handler.removeCallbacks(reattach);detached=false;releaseHeld();recheck=false;if(display!=null)display.setSurface(null);});}}
     /** The running service, for pauseAndSettle. */
     static volatile CaptureService instance;
     /**
@@ -255,14 +282,16 @@ public class CaptureService extends Service {
         CaptureService s=instance;if(s==null)return;s.pauseNow();
         try{s.worker.submit(()->{}).get(timeoutMs,TimeUnit.MILLISECONDS);}catch(Exception ignored){}
     }
-    @Override public void onCreate(){super.onCreate();instance=this;Calibration.current=Calibration.load(this);DrawPlaces.current=DrawPlaces.load(this);captureThread.start();handler=new Handler(captureThread.getLooper());}
+    @Override public void onCreate(){super.onCreate();instance=this;Calibration.current=Calibration.load(this);DrawPlaces.current=DrawPlaces.load(this);captureThread.start();handler=new Handler(captureThread.getLooper());
+    }
     @Override public IBinder onBind(Intent i){return null;}
     @Override public int onStartCommand(Intent intent,int flags,int id){
         if(intent==null||"STOP".equals(intent.getAction())){stopSelf();return START_NOT_STICKY;}
         // Pausing keeps the projection token; only the frames stop, by detaching the reader surface.
         if(projection==null&&("PAUSE".equals(intent.getAction())||"RESUME".equals(intent.getAction()))){stopSelf();return START_NOT_STICKY;}
         if("PAUSE".equals(intent.getAction())){Log.d("FactorCapture","一時停止");pauseNow();return START_NOT_STICKY;}
-        if("RESUME".equals(intent.getAction())){Log.d("FactorCapture","再開 projection="+(projection!=null)+" paused="+paused+" busy="+busy+" 表示="+contentVisible);if(projection!=null&&paused){paused=false;freshStart=true;stats.reset(SystemClock.elapsedRealtimeNanos());arrivals.reset(SystemClock.elapsedRealtimeNanos());resetStages();running=true;message="認識中";handler.post(()->{if(display!=null&&reader!=null)display.setSurface(reader.getSurface());});}return START_NOT_STICKY;}
+        if("RESUME".equals(intent.getAction())){Log.d("FactorCapture","再開 projection="+(projection!=null)+" paused="+paused+" busy="+busy+" 表示="+contentVisible);if(projection!=null&&paused){paused=false;freshStart=true;stats.reset(SystemClock.elapsedRealtimeNanos());arrivals.reset(SystemClock.elapsedRealtimeNanos());resetStages();running=true;message="認識中";listSeenAt=SystemClock.elapsedRealtime();handler.post(()->{detached=false;if(display!=null&&reader!=null)display.setSurface(reader.getSurface());
+                resumedAt=SystemClock.elapsedRealtime();handler.removeCallbacks(resumeCheck);handler.postDelayed(resumeCheck,2500);});}return START_NOT_STICKY;}
         if(projection!=null)return START_NOT_STICKY;
         try {
             startForeground(12,Ui.notification(this,"因子を認識中",CaptureService.class,12));
@@ -280,20 +309,28 @@ public class CaptureService extends Service {
             stats.reset(SystemClock.elapsedRealtimeNanos());arrivals.reset(SystemClock.elapsedRealtimeNanos());resetStages();connected=true;running=false;paused=true;
             // Reading starts at once, unless the settings say to wait for 開始 on the floating bar (認識開始を押したとき):
             // then the game can be set up first without the app reading, and heating the phone, in the meantime.
-            // What was granted decides how the frames are drawn (see FactorFrames), whatever the setting says later.
-            wholeScreen=Store.prefs(this).getBoolean("shareWholeScreen",false);
             if(startsReading(this)){paused=false;freshStart=true;running=true;message="認識中";}
             else{display.setSurface(null);message="待機中（開始で読み取り）";}
         } catch(Exception e){message="開始失敗："+e.getClass().getSimpleName();Ui.toast(this,message);stopSelf();}
         return START_NOT_STICKY;
     }
-    /** Whether the share is of the whole screen, so the app's own drawing is captured with the game. */
-    static volatile boolean wholeScreen;
     /** Whether 認識開始 starts reading straight away, or connects and waits for 開始 (a setting; reading by default). */
     static boolean startsReading(Context c){return Store.prefs(c).getBoolean("startReading",true);}
+    /**
+     * After 再開 the screen is taken again; once no frame had come at all (another game played meanwhile), and
+     * nothing was read. A frame comes at once when the surface is set, so none in 2.5 s means the reader is stuck:
+     * it is made anew.
+     */
+    private long resumedAt;
+    final Runnable resumeCheck=()->{
+        if(closed||paused||display==null||lastImageAt>=resumedAt)return;
+        Log.d("FactorCapture","再開後に画面が届かないので、受け取り口を作り直す "+width+"x"+height);
+        detached=false;display.setSurface(null);releaseHeld();if(reader!=null)reader.close();openReader();
+        display.resize(width,height,getResources().getDisplayMetrics().densityDpi);display.setSurface(reader.getSurface());
+    };
     void resize(int w,int h){
-        if(closed||w<=0||h<=0)return;width=w;height=h;
-        if(display!=null){display.setSurface(null);releaseHeld();if(reader!=null)reader.close();openReader();display.resize(w,h,getResources().getDisplayMetrics().densityDpi);if(!paused)display.setSurface(reader.getSurface());}
+        if(closed||w<=0||h<=0)return;width=w;height=h;Log.d("FactorCapture","共有画面の大きさ："+w+"x"+h+(paused?"（一時停止中）":""));
+        if(display!=null){handler.removeCallbacks(reattach);detached=false;display.setSurface(null);releaseHeld();if(reader!=null)reader.close();openReader();display.resize(w,h,getResources().getDisplayMetrics().densityDpi);if(!paused)display.setSurface(reader.getSurface());}
     }
     void openReader(){
         // One image held by us plus the ones in flight between the display and the listener.
@@ -304,13 +341,15 @@ public class CaptureService extends Service {
         reader.setOnImageAvailableListener(source->{
             Image image;try{image=source.acquireLatestImage();}catch(Exception e){message="画面取得待ち";return;}
             if(image==null)return;
-            lastImageAt=SystemClock.elapsedRealtime();arrivals.add(SystemClock.elapsedRealtimeNanos(),0);
+            long now=SystemClock.elapsedRealtime();if(resumedAt>0&&lastImageAt<resumedAt)Log.d("FactorCapture","再開後の最初の画面："+(now-resumedAt)+"ms");
+            lastImageAt=now;arrivals.add(SystemClock.elapsedRealtimeNanos(),0);
             if(closed||paused){image.close();return;}
             releaseHeld();held=image;
             // A frame that is not read now - the worker is busy, or the next read is not due yet under the reads-a-
             // second limit - still moves the frames (see followColumn). So they follow the list at the rate the
             // screen changes, while the full read runs at the rate set.
             if(busy||!readDue())followColumn(image);
+            idleDetach();
             pump();
         },handler);
     }
@@ -326,6 +365,7 @@ public class CaptureService extends Service {
      * costs a couple of thousand pixels: the frames then follow the list at the rate the screen changes rather
      * than at the rate frames are fully read.
      */
+    private int[] followBuffer=new int[0];
     void followColumn(Image image){
         FactorFrames.Snapshot last=frames;
         if(last==null||last.marks().isEmpty())return;
@@ -336,7 +376,7 @@ public class CaptureService extends Service {
             int w=image.getWidth(),h=image.getHeight();
             var plane=image.getPlanes()[0];var buffer=plane.getBuffer();int rowStride=plane.getRowStride(),pixelStride=plane.getPixelStride();
             int x=(int)Math.rint(scanX*w),from=(int)(h*top),to=(int)(h*bottom);
-            int[] column=new int[h];
+            int[] column=followBuffer.length==h?followBuffer:(followBuffer=new int[h]);
             for(int y=from;y<to;y++){int i=y*rowStride+x*pixelStride;column[y]=0xff000000|(buffer.get(i)&255)<<16|(buffer.get(i+1)&255)<<8|(buffer.get(i+2)&255);}
             List<int[]> runs=CardList.edgesOfColumn(column,w,from,to);
             if(runs.size()<2)return;
@@ -361,6 +401,7 @@ public class CaptureService extends Service {
      * a newer frame, they are moved there first: drawn as they are, they would jump back to where the list was.
      */
     void publish(FactorFrames.Snapshot snapshot){
+        if(closed||paused){frames=null;return;}   // a cycle finishing after the pause: its frames are not shown
         Rows newer=latestRows;
         if(snapshot!=null&&newer!=null&&newer.time()>cycleFrameTime){
             var moved=FactorFrames.follow(snapshot,newer.ys(),newer.boxes(),newer.pitch(),snapshot.frameWidth(),snapshot.frameHeight(),snapshot.rowHalf(),snapshot.labelX());
@@ -374,11 +415,43 @@ public class CaptureService extends Service {
     final Runnable pumpTask=this::pump;
     /** Capture thread only. Starts the next cycle on the newest frame, or re-reads the unchanged frame while rows await confirmation. */
     /** Whether pump would start a read now, as far as the reads-a-second limit goes. */
-    boolean readDue(){return SystemClock.elapsedRealtimeNanos()-last>=CycleLimit.intervalNanos(Store.prefs(this).getString("recognitionRateText",DEFAULT_RATE));}
+    boolean readDue(){return SystemClock.elapsedRealtimeNanos()-last>=readInterval();}
+    /**
+     * Most of a run shows neither list (the stat screens, races, events), and looking for one there at the full rate was
+     * most of the work done. Once no list has been seen for IDLE_AFTER_MS, reading slows to three a second (待機)
+     * and the screen is taken only that often (see idleDetach); the first list seen brings the full rate back.
+     */
+    static final long IDLE_AFTER_MS=1500,IDLE_NANOS=1_000_000_000L/3;
+    private volatile long listSeenAt;
+    boolean idle(){
+        return SystemClock.elapsedRealtime()-listSeenAt>IDLE_AFTER_MS;
+    }
+    long readInterval(){long set=CycleLimit.intervalNanos(Store.prefs(this).getString("recognitionRateText",DEFAULT_RATE));return idle()?Math.max(set,IDLE_NANOS):set;}
+    /** Worker: a list is on screen. Leaving 待機 takes the screen at every change again at once. */
+    void listSeen(){boolean was=idle();listSeenAt=SystemClock.elapsedRealtime();if(was)handler.post(reattach);}
+    /**
+     * Whether to look for the rows the older way (the whole frame) when the cards were not found: on a device whose
+     * cards were never found, always; else only on a list screen, where a card missed while scrolling may be found
+     * that way. Off the lists, in 待機, it was a whole-frame copy and search for nothing, several times a second.
+     */
+    boolean olderWay(boolean cardsSeen){return !cardsSeen||!idle();}
+    private volatile boolean factorCardsSeen,skillCardsSeen;
+    /**
+     * Capture thread. In 待機 the screen is let go right after a frame is taken, and taken back one idle interval
+     * later: while let go the system does not draw the copy of the screen at all, rather than drawing it for every
+     * change of the game and having it thrown away. Taken back, it draws the current screen at once.
+     */
+    private boolean detached;
+    final Runnable reattach=()->{if(!detached)return;detached=false;if(!closed&&!paused&&display!=null&&reader!=null)display.setSurface(reader.getSurface());};
+    void idleDetach(){
+        if(detached||closed||paused||display==null||!idle())return;
+        detached=true;display.setSurface(null);
+        handler.removeCallbacks(reattach);handler.postDelayed(reattach,IDLE_NANOS/1_000_000);
+    }
     void pump(){
         if(closed||paused||busy)return;
         // An adjustable upper bound, not a frame queue or a promised frame rate.
-        long now=SystemClock.elapsedRealtimeNanos(),interval=CycleLimit.intervalNanos(Store.prefs(this).getString("recognitionRateText",DEFAULT_RATE));
+        long now=SystemClock.elapsedRealtimeNanos(),interval=readInterval();
         // Rounded up to the millisecond the handler counts in, so it never fires early - and never a whole extra
         // millisecond late, as the old "+1" made it on every cycle.
         if(now-last<interval){handler.removeCallbacks(pumpTask);handler.postDelayed(pumpTask,(last+interval-now+999_999)/1_000_000);return;}
@@ -417,7 +490,9 @@ public class CaptureService extends Service {
             // After a pause the screen may be anywhere, so half-confirmed rows from before it must not count.
             if(workerGeneration!=generation||freshStart){workerGeneration=generation;freshStart=false;candidate="";stable=0;confirmations.clear();settle.forget();recentNames.clear();
                 // The skill screen's own half-confirmed rows, likewise: after a reset each row needs two fresh reads again.
-                skillHits.clear();skillTop=Integer.MIN_VALUE;}
+                skillHits.clear();skillTop=Integer.MIN_VALUE;
+                // New models installed since these were loaded (Modules.installed): loaded again from this cycle on.
+                if(modelsLoaded!=Modules.installed){modelsLoaded=Modules.installed;closeModels();}}
             // The inference mode can be flipped in the display settings while running, for side-by-side timing.
             int threadSetting=Store.prefs(this).getInt("inferenceThreads",0);
             stage(0,grabbed);  // every mode, so a skill cycle's grab is not counted as そのほか
@@ -434,9 +509,11 @@ public class CaptureService extends Service {
             startCopy(w,h);copyRows(frame,w,titleBox[1],titleBox[3]);copyRows(frame,w,listFrom,listTo);
             long t1=SystemClock.elapsedRealtimeNanos();stage(1,t1-t0);
             FactorVision.Layout layout=FactorVision.detectCards(pixels,w,h,listFrom,listTo);boolean cards=layout!=null;
-            // No cards there (another device, another layout): the whole frame, and the older way.
-            if(layout==null){copyRows(frame,w,0,h);layout=FactorVision.detect(pixels,w,h);}
-            if(autoSwitch(w,h,false,cards))return;
+            if(cards)listSeen();
+            // No cards there (another device, another layout): the whole frame, and the older way - see olderWay.
+            if(layout==null&&olderWay(factorCardsSeen)){copyRows(frame,w,0,h);layout=FactorVision.detect(pixels,w,h);}
+            if(cards)factorCardsSeen=true;
+            if(autoSwitch(frame,w,h,false,cards))return;
             long t2=SystemClock.elapsedRealtimeNanos();stage(2,t2-t1);
             if(layout==null){frames=null;candidate="";stable=0;confirmations.clear();settle.forget();recentNames.clear();synchronized(CaptureService.class){noRows++;}return;}
             // Rows of the game are on this frame, so the game is on screen: the frames show again even if the
@@ -489,8 +566,8 @@ public class CaptureService extends Service {
             // Those rows must not be counted under the new page, so only a frame that matches the previous one counts.
             if(!settle.settled(mask,layout.starX(),layout.pitch())){confirmations.clear();recheck=true;return;}
             // Rows the model is only fairly sure of are read again as text and matched against every factor name
-            // - the dataset above still gets the model's own answers, so its misses stay visible there.
             readings=checkFactorNames(frame,w,h,layout,readings);
+            // After the names are checked, so a row the model misread is kept in the card book under its right name.
             List<PagePlaces.Row> placed=new ArrayList<>();
             for(var row:readings)if(row.nameConfidence()>=FactorVision.NAME_MIN&&row.starConfidence()>=FactorVision.STAR_MIN)placed.add(new PagePlaces.Row(row.name(),row.y()));
             places.record(label,placed);
@@ -499,14 +576,13 @@ public class CaptureService extends Service {
                 if(row.nameConfidence()<FactorVision.NAME_MIN||row.starConfidence()<FactorVision.STAR_MIN)continue;
                 String key=row.name()+":"+row.stars();present.add(key);
                 int hits=confirmations.getOrDefault(key,0)+1;confirmations.put(key,Math.min(2,hits));
-                if(hits>=2&&stable>=2){accepted.put(row.name(),row.stars());
-                }
+                if(hits>=2&&stable>=2)accepted.put(row.name(),row.stars());
             }
             confirmations.keySet().retainAll(present);
             recheck=accepted.size()<present.size();
             // A cycle that finishes after a pause registers nothing: what was paused on (e.g. for a send) must not change.
             if(!closed&&!paused&&stable>=2&&!accepted.isEmpty())synchronized(CaptureService.class){if(generation==resultGeneration)results.computeIfAbsent(label,k->new LinkedHashMap<>()).putAll(accepted);}
-            message="認識中："+label;
+            if(!closed&&!paused)message="認識中："+label;   // a cycle ending after a pause must not undo its 一時停止中
         }catch(Exception e){message="認識エラー："+e.getClass().getSimpleName();}
         finally{
             long end=SystemClock.elapsedRealtimeNanos();stats.add(end,end-started);
@@ -602,7 +678,9 @@ public class CaptureService extends Service {
     /** The top row's position last frame, to tell a still list from a scrolling one. */
     private int skillTop=Integer.MIN_VALUE;
 
-    private final PagePlaces skillPlaces=new PagePlaces();
+    /** Where each skill sits in the list. Static and cleared with the skill results, like the factors' places:
+     *  kept across a reset, the last run's places would put a new skill on top of a known one and drop it. */
+    static final PagePlaces skillPlaces=new PagePlaces();
     void readSkills(Bitmap frame,int w,int h,long generation,int threadSetting) throws Exception {
         // The thread count is found as for the factor models, unless one is fixed in the settings.
         if(skillVision==null){var set=Modules.readSet(this,"skill.onnx","labels.json");
@@ -615,9 +693,11 @@ public class CaptureService extends Service {
         startCopy(w,h);copyRows(frame,w,listFrom,listTo);
         long t1=SystemClock.elapsedRealtimeNanos();stage(1,t1-t0);
         SkillVision.Layout layout=SkillVision.fromCards(pixels,w,h,listFrom,listTo);boolean cards=layout!=null;
-        // No cards there (another device, another layout): the whole frame, and the older way.
-        if(layout==null){copyRows(frame,w,0,h);layout=SkillVision.detect(pixels,w,h);}
-        if(autoSwitch(w,h,true,cards))return;
+        if(cards)listSeen();
+        // No cards there (another device, another layout): the whole frame, and the older way - see olderWay.
+        if(layout==null&&olderWay(skillCardsSeen)){copyRows(frame,w,0,h);layout=SkillVision.detect(pixels,w,h);}
+        if(cards)skillCardsSeen=true;
+        if(autoSwitch(frame,w,h,true,cards))return;
         long t2=SystemClock.elapsedRealtimeNanos();stage(2,t2-t1);
         if(layout==null){
             // Losing the layout for a frame wipes every frame on screen, so it is worth knowing when it happens.
@@ -637,7 +717,7 @@ public class CaptureService extends Service {
         boolean moving=skillTop!=Integer.MIN_VALUE&&Math.abs(top-skillTop)>2;
         skillTop=top;
         // The frames move onto the rows now, before the model runs, so they keep up with a scrolling list.
-        int rowHalf=(int)Math.rint(layout.pitch()*.39),labelX=SkillVision.textLeft(layout.iconRight(),layout.pitch());
+        int rowHalf=(int)Math.rint(layout.pitch()*.39),labelX=(int)Math.rint(DrawPlaces.current.nameX*w);
         List<int[]> boxes=new ArrayList<>();for(int y:layout.ys())boxes.add(layout.frameOf(y));
         FactorFrames.Snapshot early=FactorFrames.follow(frames,layout.ys(),boxes,layout.pitch(),w,h,rowHalf,labelX);
         if(early!=null)publish(early);
@@ -654,7 +734,7 @@ public class CaptureService extends Service {
             readings=checkNames(frame,layout,readings);
         }
         // What the frames show (動作モード): the plan and rates from the efficiency data, the preset's levels, both, or neither.
-        int frameMode=skillFrameMode(this);boolean useTools=frameMode==TOOLS_AND_PRESET||frameMode==TOOLS_ONLY;
+        int frameMode=skillFrameMode(this);boolean useTools=frameMode==TOOLS_AND_PRESET||frameMode==TOOLS_ONLY||frameMode==EXAM;
         Set<String> plan=useTools?planned:Set.of();
         Map<String,List<Store.Rule>> levels=frameMode==TOOLS_AND_PRESET||frameMode==PRESET_ONLY?presetRules():Map.of();
         boolean detailed=presetDetailed;
@@ -678,7 +758,7 @@ public class CaptureService extends Service {
                 String line=null;
                 if(was!=null){
                     nowYs.add(row.y());nowNames.add(was);
-                    if(useTools)synchronized(CaptureService.class){Skill known=skills.get(was);if(known!=null)line=label(was,known.pt(),gains);}
+                    if(useTools)synchronized(CaptureService.class){Skill known=skills.get(was);if(known!=null)line=labelFor(was,known.pt(),gains);}
                     else line=was;
                 }
                 marks.add(skillMark(frameMode,row.y(),was,was!=null&&plan.contains(was),!plan.isEmpty(),levels,detailed,ranks,line,layout.frameOf(row.y())));
@@ -706,8 +786,11 @@ public class CaptureService extends Service {
             if(lineName!=null){nowYs.add(row.y());nowNames.add(lineName);}
             int linePt=shownPt;
             if(lineName!=null&&!lineName.equals(row.name()))synchronized(CaptureService.class){Skill known=skills.get(lineName);linePt=known!=null?known.pt():-1;}
-            String line=lineName==null?null:useTools?label(lineName,linePt,gains):lineName;
-            marks.add(skillMark(frameMode,row.y(),lineName,wanted,!plan.isEmpty(),levels,detailed,ranks,line,layout.frameOf(row.y())));
+            String line=lineName==null?null:useTools?labelFor(lineName,linePt,gains):lineName;
+            // The price read for this row, for the plan: shown by the price box, or on the line when shown as 「名前の下に線」
+            // (see FactorFrames.priceBox). A skill already taken needs none.
+            int price=!useTools||owned?FactorFrames.PRICE_NONE:shownPt>0?shownPt:FactorFrames.PRICE_UNKNOWN;
+            marks.add(skillMark(frameMode,row.y(),lineName,wanted,!plan.isEmpty(),levels,detailed,ranks,line,layout.frameOf(row.y())).withPrice(price));
             int hits=skillHits.getOrDefault(row.name(),0)+1;skillHits.put(row.name(),Math.min(2,hits));
             // While the list moves the text recogniser is not run, so a name the model was merely fairly sure of
             // would go into the list unchecked - and a wrong one sticks, with the real skill missing. Only names
@@ -728,22 +811,14 @@ public class CaptureService extends Service {
         lastRowYs=nowYs;lastRowNames=nowNames;
         skillHits.keySet().retainAll(seen);
         recheck=accepted.size()<seen.size();
-        publish(new FactorFrames.Snapshot(w,h,marks,(int)Math.rint(layout.pitch()*.39),SkillVision.textLeft(layout.iconRight(),layout.pitch())));
+        publish(new FactorFrames.Snapshot(w,h,marks,(int)Math.rint(layout.pitch()*.39),labelX));
         visibleSkills=List.copyOf(seen);
-        skillPlaces.record(Store.SKILL,placed);
+        boolean measured=skillPlaces.record(Store.SKILL,placed);
         // Every cycle that needed the recogniser: how many calls, and how long from the first request to the last answer.
         if(ocrCalls>0)Log.d("FactorOcr",String.format(Locale.JAPAN,"OCR %d回 %.0fms（1回あたり %.0fms）",ocrCalls,
             (SystemClock.elapsedRealtimeNanos()-ocrStarted)/1e6,(SystemClock.elapsedRealtimeNanos()-ocrStarted)/1e6/ocrCalls));
         if(!closed&&!paused&&!accepted.isEmpty())synchronized(CaptureService.class){
             if(generation!=resultGeneration)return;
-            // Rows whose owned state flips in the same frame were taken, or given back, together: that is the
-            // gold skill buying its white one, or ◎ buying ○. Two such rows are a set worth remembering.
-            List<String> took=new ArrayList<>(),gave=new ArrayList<>();
-            for(var skill:accepted.values()){
-                Skill before=skills.get(skill.name());
-                if(before==null||before.acquired()==skill.acquired())continue;
-                (skill.acquired()?took:gave).add(skill.name());
-            }
             var places=skillPlaces.of(Store.SKILL);
             for(var skill:accepted.values()){
                 Skill before=skills.get(skill.name());
@@ -751,12 +826,16 @@ public class CaptureService extends Service {
                 int place=places.getOrDefault(skill.name(),skill.place());
                 // A name read wrongly earlier sits at this very place; the row can only hold one skill, so
                 // whatever else claims this position makes way for what is being read now.
+                // Only when this frame's places were measured: placed by a guess (no row in common with what was
+                // seen), a row could land on a skill read right elsewhere and take it away.
                 int near=(int)Math.rint(layout.pitch()*.4);
-                skills.entrySet().removeIf(other->!other.getKey().equals(skill.name())&&Math.abs(other.getValue().place()-place)<near);
+                if(measured)skills.entrySet().removeIf(other->!other.getKey().equals(skill.name())&&Math.abs(other.getValue().place()-place)<near);
                 skills.put(skill.name(),new Skill(skill.name(),pt,skill.acquired(),place));
+                // The row shows ◎ once its ○ is bought: a ○ still listed from before was bought.
+                String n=skill.name().trim();if(n.endsWith("◎"))skills.remove(n.substring(0,n.length()-1)+"○");
             }
         }
-        message="スキル "+skills.size()+"件"+(ownedPt>=0?"／所持 "+ownedPt+"pt":"");
+        if(!closed&&!paused)message="スキル "+skills.size()+"件"+(ownedPt>=0?"／所持 "+ownedPt+"pt":"");
     }
     /**
      * The rows of the last skill frame whose name was known - read surely, or carried over - by where they were.
@@ -798,6 +877,15 @@ public class CaptureService extends Service {
         if(showNames)return known?String.format(Locale.JAPAN,"%s  %.2f/100pt",name,gain/pt*100):name;
         return name;
     }
+    /**
+     * The line under a skill's name, as the plan sees buying it from what is owned now: the family members below it
+     * that are not owned yet come along, so they add to what it costs (a gold skill's shown price already has them
+     * in; a ◎'s is only its step), and what it gains is its value less that of the owned one it replaces, plus the
+     * bonus of each one bought (評価試験). 恩返し 200 / 100pt, 極上 600 / 300pt; with 恩返し owned, 極上 400 / 200pt.
+     */
+    String labelFor(String name,int pt,Map<String,Double> gains){
+        return label(name,pt,gains);
+    }
     /** Settable: the name as read goes in front of the rate, to check ○ against ◎ on the screen. */
     static volatile boolean showNames;
     /** Skill name → the gain the efficiency data gives it, for the style the selected event is set to; none without it. */
@@ -811,12 +899,14 @@ public class CaptureService extends Service {
      * 動作モード of the skill screen: what its frames and the line under each name come from. TOOLS_ONLY is how it
      * always was, and the default.
      */
-    static final int TOOLS_AND_PRESET=0,TOOLS_ONLY=1,PRESET_ONLY=2,NEITHER=3;
+    static final int TOOLS_AND_PRESET=0,TOOLS_ONLY=1,PRESET_ONLY=2,NEITHER=3,EXAM=4;
     // The first two use the efficiency data, which is not in every build: there only the last two are offered.
-    static final String[] FRAME_MODES={null,null,"プリセットのみ","両方なし"};
+    static final String[] FRAME_MODES={null,null,"プリセットのみ","両方なし",null};
     static final String[] FRAME_MODE_NOTES={null,null,"因子と同じ。プリセットの色で枠","読めた行に緑の枠だけ"};
     static int skillFrameMode(Context c){return Store.prefs(c).getInt("skillFrameMode",PRESET_ONLY)==NEITHER?NEITHER:PRESET_ONLY;}
     static boolean usesTools(Context c){int m=skillFrameMode(c);return m==TOOLS_AND_PRESET||m==TOOLS_ONLY;}
+    /** Whether the skill plan (the numbers and the colours it gives) is used in this 動作モード. */
+    static boolean usesPlan(Context c){return usesTools(c)||skillFrameMode(c)==EXAM;}
     static boolean usesSkillSet(Context c){int m=skillFrameMode(c);return m==TOOLS_AND_PRESET||m==PRESET_ONLY;}
     /**
      * A skill row's frame. Its own colour is green for a row read before any plan, red for one to buy, and nothing
@@ -845,14 +935,14 @@ public class CaptureService extends Service {
     }
     static final String[] TIER_LETTERS={"必","重","要","本"};
     /**
-     * Every skill that could be taken, numbered 1, 2, 3… by what it pays out per point, best first: fixed when the
-     * plan is worked out (see FloatingService.planWithOwnedPt), and shown while the plan is.
+     * The plan's skills numbered 1, 2, 3… by what they pay out per point, best first: fixed when the plan is worked
+     * out (see FloatingService.planWithOwnedPt), and shown while it is. Skills outside the plan get no number.
      */
     static volatile Map<String,Integer> planRanks=Map.of();
     /** The plan's skills, spread over the colours 0-6 by their rate, best first: the colour each is framed in. */
     static volatile Map<String,Integer> planLevels=Map.of();
-    /** How far down the numbers the points owned go when bought in number order, and the points then left: {number, left}. */
-    static volatile int[] rankReach;
+    /** The points the plan uses and the points it leaves: {used, left}. */
+    static volatile int[] planSpent;
     /** The selected factor preset's levels, parsed again only when a preset was saved or another chosen. */
     Map<String,List<Store.Rule>> presetRules(){
         var prefs=Store.prefs(this);
@@ -960,7 +1050,7 @@ public class CaptureService extends Service {
         closed=true;running=false;connected=false;frames=null;contentVisible=true;message="停止中";
         // Tear down on the capture thread so the frame listener never races a released reader.
         handler.post(()->{releaseHeld();if(display!=null)display.release();if(reader!=null)reader.close();if(projection!=null)projection.stop();captureThread.quitSafely();});
-        worker.execute(()->{activeVision=null;if(headerReader!=null)headerReader.close();if(vision!=null)try{vision.close();}catch(Exception ignored){}if(skillVision!=null)skillVision.close();});worker.shutdown();
+        worker.execute(()->{if(headerReader!=null)headerReader.close();closeModels();});worker.shutdown();
         super.onDestroy();
     }
 }

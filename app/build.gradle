@@ -1,11 +1,14 @@
 plugins { id 'com.android.application' }
 
-// Release signing key, for the APKs that are published. keystore.properties and the key itself are
-// kept out of the repository (.gitignore); without them the release build falls back to the debug key,
-// which is fine for testing on this PC but must never be distributed.
+// Release signing key, for the APKs that are published. Its settings are read from keystore.properties in the
+// project, or else from factor-assist-keystore.properties in the user's home folder - kept there, outside every
+// copy of the project, the published copy built on this PC is signed too, with nothing to copy in and delete
+// after. Neither the settings nor the key are ever in the repository; without them the release build falls back
+// to the debug key, which is fine for testing on this PC but must never be distributed.
 def signing = new Properties()
-def signingFile = rootProject.file('keystore.properties')
-if (signingFile.exists()) signingFile.withInputStream { signing.load(it) }
+def signingFile = [rootProject.file('keystore.properties'),
+                   new File(System.getProperty('user.home'), 'factor-assist-keystore.properties')].find { it.exists() }
+if (signingFile != null) signingFile.withInputStream { signing.load(it) }
 
 android {
     signingConfigs {
@@ -19,7 +22,7 @@ android {
     namespace 'jp.factor.overlay'
     compileSdk 35
     defaultConfig {
-        applicationId 'jp.factor.overlay'; minSdk 34; targetSdk 35; versionCode 7; versionName '0.4.0'
+        applicationId 'jp.factor.overlay'; minSdk 34; targetSdk 35; versionCode 8; versionName '0.5.0'
         // Only 64-bit ARM: x86/x86_64 are for emulators, and minSdk 34 leaves no 32-bit ARM devices.
         // ONNX Runtime and ML Kit ship all four, which would be three quarters of the APK.
         ndk { abiFilters 'arm64-v8a' }

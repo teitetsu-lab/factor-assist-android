@@ -14,10 +14,15 @@ final class PagePlaces {
     private final Map<String,Map<String,Integer>> places=new LinkedHashMap<>();
     private final Map<String,Integer> scrolled=new HashMap<>();
 
-    /** Places every row of this frame, using the ones already known to measure how far the page has scrolled. */
-    synchronized void record(String label,List<Row> rows){
-        if(rows.isEmpty())return;
+    /**
+     * Places every row of this frame, using the ones already known to measure how far the page has scrolled. False
+     * when none was known to measure by (and the page had some already): its rows are placed by the last distance,
+     * a guess, and may sit on rows they are not.
+     */
+    synchronized boolean record(String label,List<Row> rows){
+        if(rows.isEmpty())return true;
         Map<String,Integer> place=places.computeIfAbsent(label,k->new HashMap<>());
+        boolean fresh=place.isEmpty();
         List<Integer> shifts=new ArrayList<>();
         for(Row row:rows){Integer known=place.get(row.name());if(known!=null)shifts.add(known-row.y());}
         int offset;
@@ -25,6 +30,7 @@ final class PagePlaces {
         else offset=scrolled.getOrDefault(label,0);   // nothing in common: keep the last known scroll distance
         scrolled.put(label,offset);
         for(Row row:rows)place.putIfAbsent(row.name(),row.y()+offset);
+        return fresh||!shifts.isEmpty();
     }
     /** The given names of one page, top to bottom; anything never placed goes last. */
     synchronized List<String> ordered(String label,Collection<String> names){
@@ -40,6 +46,8 @@ final class PagePlaces {
         return out;
     }
     synchronized void clear(){places.clear();scrolled.clear();}
+    /** A page's places as kept (ResultHistory), put back. */
+    synchronized void set(String label,Map<String,Integer> at){places.put(label,new HashMap<>(at));scrolled.remove(label);}
     synchronized void remove(String label,String name){
         Map<String,Integer> place=places.get(label);
         if(place!=null){place.remove(name);if(place.isEmpty()){places.remove(label);scrolled.remove(label);}}

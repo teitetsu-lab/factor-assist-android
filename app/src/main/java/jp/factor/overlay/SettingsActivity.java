@@ -105,23 +105,11 @@ public class SettingsActivity extends Activity {
             if((i==0)==reading)r.setChecked(true);
             boolean on=i==0;r.setOnCheckedChangeListener((b,checked)->{if(checked)prefs.edit().putBoolean("startReading",on).apply();});
         }
-        Ui.cardLabel(page,"画面共有の方法");
-        LinearLayout share=Ui.card(page);
-        RadioGroup shares=new RadioGroup(this);share.addView(shares);
-        String[][] ways={{"アプリを選ぶ","許可画面で「単一のアプリ」→ウマ娘を選ぶ"},{"画面全体","許可画面は「開始」だけ。ウマ娘を自動で起動"}};
-        boolean whole=prefs.getBoolean("shareWholeScreen",false);
-        for(int i=0;i<ways.length;i++){
-            RadioButton r=radio(ways[i][0],ways[i][1]);shares.addView(r);
-            if((i==1)==whole)r.setChecked(true);
-            boolean on=i==1;r.setOnCheckedChangeListener((b,checked)->{if(checked)prefs.edit().putBoolean("shareWholeScreen",on).apply();});
-        }
         Ui.cardLabel(page,"因子画面の表示");
         markChoices("factorMarks",false,new String[]{"frame","letter"},new String[]{"枠","★の左に文字"});
         Ui.cardLabel(page,"スキル取得画面の表示");
         markChoices("skillMarks",true,new String[]{"frame","line"},new String[]{"枠","名前の下に線"});
-        TextView wholeNote=new TextView(this);wholeNote.setTextColor(Ui.MUTED);wholeNote.setTextSize(12);wholeNote.setPadding(Ui.dp(this,6),0,Ui.dp(this,6),Ui.dp(this,12));
-        wholeNote.setText("画面共有を「画面全体」にしているときは、読み取りの判定の都合で「★の左に文字」「名前の下に線」しか使えません（枠を選んでいてもこちらで表示します）。");
-        page.addView(wholeNote);
+
         Ui.cardLabel(page,"ゲームの上の表示");
         LinearLayout overlay=Ui.card(page);
         switchRow(overlay,"メニューや詳細もテーマに合わせる","オフならゲームの上は明るい色のまま",prefs.getBoolean("overlayTheme",true),

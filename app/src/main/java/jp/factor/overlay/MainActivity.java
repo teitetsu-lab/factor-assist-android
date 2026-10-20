@@ -16,11 +16,25 @@ public class MainActivity extends Activity {
     final Map<String,String> parts=new HashMap<>(); TextView status; boolean resumed;
     @Override protected void onResume(){super.onResume();resumed=true;}
     @Override protected void onPause(){resumed=false;super.onPause();}
+    @Override protected void onSaveInstanceState(Bundle out){super.onSaveInstanceState(out);out.putSerializable("qrParts",new HashMap<>(parts));}
+    /** 開始 from the floating buttons while this screen is open already: it comes here, not to onCreate. */
+    @Override protected void onNewIntent(android.content.Intent intent){
+        super.onNewIntent(intent);setIntent(intent);
+        if(intent.getBooleanExtra("capture",false)){intent.removeExtra("capture");new android.os.Handler().post(this::capture);}
+    }
     /** Light or dark as set in the app's settings (see Ui.themed). */
     @Override protected void attachBaseContext(Context base){super.attachBaseContext(Ui.themed(base,false));themeMade=Ui.theme(base);}
     @Override public void onCreate(Bundle state) {
-        super.onCreate(state);render();
-        if(getIntent().getBooleanExtra("capture",false))new android.os.Handler().post(this::capture);
+        super.onCreate(state);
+        // Split QR parts read so far: kept when the screen is made again (rotation, theme).
+        if(state!=null){var kept=state.getSerializable("qrParts",HashMap.class);if(kept!=null)for(Object k:kept.keySet())parts.put(String.valueOf(k),String.valueOf(kept.get(k)));}
+        render();
+        // Only on the start itself: made again (the theme, a rotation, after the process died) or opened from recents,
+        // the same intent would start capturing again unasked.
+        boolean fromHistory=(getIntent().getFlags()&android.content.Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY)!=0;
+        if(state==null&&!fromHistory&&getIntent().getBooleanExtra("capture",false))new android.os.Handler().post(this::capture);
+        getIntent().removeExtra("capture");
+        // The skills' effects and the courses (StaminaCalc: the stamina and the 試走), taken again when old.
         if(checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=android.content.pm.PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"},9);
     }
     /**
@@ -63,18 +77,18 @@ public class MainActivity extends Activity {
         var startLp=new LinearLayout.LayoutParams(-1,-2);startLp.topMargin=Ui.dp(this,18);hero.addView(start,startLp);
         // The six things done here.
         GridLayout tiles=new GridLayout(this);tiles.setColumnCount(2);content.addView(tiles,new LinearLayout.LayoutParams(-1,-2));
-        android.view.View[] all={
+        List<android.view.View> all=new ArrayList<>();
+        all.addAll(List.of(
             Ui.tile(this,android.R.drawable.ic_menu_edit,"プリセットを編集","登録する因子と優先度",()->Ui.edit(this,false,this::render)),
             Ui.tile(this,android.R.drawable.ic_input_add,"新規プリセット","空のプリセットを作る",()->Ui.newPreset(this,false,this::render)),
             Ui.tile(this,android.R.drawable.stat_sys_download_done,"プリセットを取り込む","共有コード・QR・ファイルから",this::importChooser),
             Ui.tile(this,android.R.drawable.stat_sys_upload_done,"プリセットを書き出す","共有コード・QR・ファイルへ",this::exportChooser),
             // Other phones and tablets: fit where the page title and the chips are from a screenshot.
             Ui.tile(this,android.R.drawable.ic_menu_crop,"読み取り位置の調整","うまく読めないときに",()->startActivity(new Intent(this,CalibrationActivity.class))),
-            Ui.tile(this,android.R.drawable.ic_menu_preferences,"アプリ設定","テーマ・ボタンの見た目",()->startActivity(new Intent(this,SettingsActivity.class))),
-        };
-        for(int i=0;i<all.length;i++){
+            Ui.tile(this,android.R.drawable.ic_menu_preferences,"アプリ設定","テーマ・ボタンの見た目",()->startActivity(new Intent(this,SettingsActivity.class)))));
+        for(int i=0;i<all.size();i++){
             var lp=new GridLayout.LayoutParams(GridLayout.spec(i/2),GridLayout.spec(i%2,1f));lp.width=0;
-            lp.setMargins(i%2==0?0:Ui.dp(this,6),0,i%2==0?Ui.dp(this,6):0,Ui.dp(this,12));tiles.addView(all[i],lp);
+            lp.setMargins(i%2==0?0:Ui.dp(this,6),0,i%2==0?Ui.dp(this,6):0,Ui.dp(this,12));tiles.addView(all.get(i),lp);
         }
         Button quit=Ui.textButton(this,"終了する",()->{stopService(new Intent(this,CaptureService.class));stopService(new Intent(this,FloatingService.class));finishAndRemoveTask();});
         content.addView(quit,new LinearLayout.LayoutParams(-1,Ui.dp(this,52)));
@@ -122,23 +136,19 @@ public class MainActivity extends Activity {
     void capture(){if(!CaptureService.skillMode(this)&&Store.selected(this)==null){Ui.toast(this,"先にプリセットを選択してください");return;}if(!permission())return;if(CaptureService.running)return;
         // A paused share is still connected: resume it without asking for consent again.
         if(CaptureService.connected){startForegroundService(new Intent(this,FloatingService.class));if(CaptureService.startsReading(this))CaptureService.resume(this);if(!Ui.launchGame(this))moveTaskToBack(true);return;}
-        // 画面全体 (a setting): the consent then only asks to start, with no app to pick; the game is brought up once
-        // it is granted (onActivityResult). Otherwise the user picks the game as a single app, as before.
-        var projections=getSystemService(MediaProjectionManager.class);
-        startActivityForResult(Store.prefs(this).getBoolean("shareWholeScreen",false)
-            ?projections.createScreenCaptureIntent(android.media.projection.MediaProjectionConfig.createConfigForDefaultDisplay())
-            :projections.createScreenCaptureIntent(),1);}
+        // The user picks the game as a single app: only the game is captured, never this app's own drawing.
+        startActivityForResult(getSystemService(MediaProjectionManager.class).createScreenCaptureIntent(),1);}
     void importCode(String raw){try{String code=ShareCode.accept(raw.trim(),parts);if(code==null){status.setText("分割QRを保持しました。残りの画像を読み込んでください");return;}JSONObject value=ShareCode.decode(code);
         boolean exists=false;JSONArray all=Store.all(this);for(int i=0;i<all.length();i++)if(all.optJSONObject(i).optString("id").equals(value.optString("id")))exists=true;
-        Runnable apply=()->{Store.save(this,value);parts.clear();render();status.setText("取り込み済み："+value.optString("name"));};
+        Runnable apply=()->{Store.save(this,value);render();status.setText("取り込み済み："+value.optString("name"));};
         if(exists)new AlertDialog.Builder(this).setTitle(value.optString("name")).setMessage("端末内の同じプリセットを更新しますか？").setPositiveButton("更新",(d,w)->apply.run()).setNeutralButton("別コピー",(d,w)->{try{value.put("id",UUID.randomUUID().toString());apply.run();}catch(Exception ignored){}}).setNegativeButton("キャンセル",null).show();else apply.run();
     }catch(Exception e){Ui.toast(this,"読み込み失敗："+e.getMessage());}}
     void image(Uri uri){try{var scanner=BarcodeScanning.getClient();scanner.process(InputImage.fromFilePath(this,uri)).addOnSuccessListener(codes->{if(codes.isEmpty())Ui.toast(this,"QRコードが見つかりません");for(var code:codes)if(code.getRawValue()!=null)importCode(code.getRawValue());}).addOnFailureListener(e->Ui.toast(this,"画像を読めませんでした")).addOnCompleteListener(t->scanner.close());}catch(Exception e){Ui.toast(this,"画像を開けませんでした");}}
     @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(result!=RESULT_OK||data==null)return;
         if(request==1){startForegroundService(new Intent(this,FloatingService.class));startForegroundService(new Intent(this,CaptureService.class).putExtra("grant",data).putExtra("result",result));
             // Sharing a single app already brought the game forward; opening it again would pause and resume
-            // the Unity activity back to back, which can freeze it. Only when this screen is still in front
-            // (whole-screen sharing) is the game opened here.
+            // the Unity activity back to back, which can freeze it. Only when this screen is still in front (the
+            // whole screen picked in the consent dialog after all) is the game opened here.
             new android.os.Handler().postDelayed(()->{if(resumed&&!Ui.launchGame(this))moveTaskToBack(true);},400);}
         if(request==2){if(data.getClipData()!=null)for(int i=0;i<data.getClipData().getItemCount();i++)image(data.getClipData().getItemAt(i).getUri());else if(data.getData()!=null)image(data.getData());}
         if(request==4)try(var out=getContentResolver().openOutputStream(data.getData(),"wt")){JSONObject p=Store.selected(this);out.write(ShareCode.encode(p).getBytes(java.nio.charset.StandardCharsets.US_ASCII));Ui.toast(this,"保存しました："+p.optString("name"));}catch(Exception e){Ui.toast(this,"保存できませんでした");}
