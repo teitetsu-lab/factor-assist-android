@@ -12,8 +12,13 @@ final class FactorVision implements AutoCloseable {
      * cards is the factor rows as whole cards (see cards()), when they could be found; the crops are then placed
      * from each card. Null means the rows came from the gold stars alone, the older way, kept for screens where
      * the cards cannot be told from the background.
+     *
+     * measuredStarX is where the star column is on this very frame. With cards, starX is fixed to the width (see
+     * steady) and cannot show the list moving; a page still sliding sideways into place shows only in the measured
+     * one (PageSettle). Found the older way, starX is measured already and the two are the same.
      */
-    record Layout(int pitch, int starX, List<Integer> ys, List<CardList.Card> cards) {
+    record Layout(int pitch, int starX, List<Integer> ys, List<CardList.Card> cards, int measuredStarX) {
+        Layout(int pitch,int starX,List<Integer> ys,List<CardList.Card> cards){this(pitch,starX,ys,cards,starX);}
         Layout(int pitch,int starX,List<Integer> ys){this(pitch,starX,ys,null);}
     }
     record Reading(String name, int stars, float nameConfidence, float starConfidence, int y) {}
@@ -39,9 +44,11 @@ final class FactorVision implements AutoCloseable {
         return page==null?List.of():page.cards();
     }
     static CardList.Page page(int[] pixels,int width,int height){return page(pixels,width,height,0,height);}
-    static CardList.Page page(int[] pixels,int width,int height,int from,int to){
-        return steady(CardList.find(pixels,width,height,CARD_SCAN_X,0,from,to,
-            card->card.x(STARS[2]+STAR_HALF)<width&&stars(pixels,width,height,card)[0]>0),width);
+    static CardList.Page page(int[] pixels,int width,int height,int from,int to){return steady(found(pixels,width,height,from,to),width);}
+    /** The page as found, its cards' left edge as measured on this frame. */
+    private static CardList.Page found(int[] pixels,int width,int height,int from,int to){
+        return CardList.find(pixels,width,height,CARD_SCAN_X,0,from,to,
+            card->card.x(STARS[2]+STAR_HALF)<width&&stars(pixels,width,height,card)[0]>0);
     }
     /**
      * The list's left edge, the usual card height and the row pitch as shares of the screen width, measured on a
@@ -66,11 +73,11 @@ final class FactorVision implements AutoCloseable {
     static final double LIST_TOP=.15, LIST_BOTTOM=.85;
     /** The factor rows from the cards in rows from..to only; null when fewer than two cards are there. */
     static Layout detectCards(int[] pixels,int width,int height,int from,int to){
-        CardList.Page page=page(pixels,width,height,from,to);
+        CardList.Page found=found(pixels,width,height,from,to),page=steady(found,width);
         if(page==null)return null;
         List<Integer> ys=new ArrayList<>();
         for(CardList.Card card:page.cards())ys.add(card.centre());
-        return new Layout(page.pitch(),page.cards().get(0).x(STAR_COLUMN),ys,page.cards());
+        return new Layout(page.pitch(),page.cards().get(0).x(STAR_COLUMN),ys,page.cards(),found.cards().get(0).x(STAR_COLUMN));
     }
     /**
      * The stars lit on a card, by colour at the three star places: {lit, clear} where clear is 0 when a place is

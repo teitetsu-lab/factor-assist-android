@@ -564,7 +564,8 @@ public class CaptureService extends Service {
             if(label.equals(candidate))stable++;else{candidate=label;stable=1;confirmations.clear();recentNames.clear();}
             // Mid swipe the new title is already showing while the previous page's rows are still sliding past.
             // Those rows must not be counted under the new page, so only a frame that matches the previous one counts.
-            if(!settle.settled(mask,layout.starX(),layout.pitch())){confirmations.clear();recheck=true;return;}
+            // The star column as measured on this frame: the fixed one the crops use never moves (FactorVision.Layout).
+            if(!settle.settled(mask,layout.measuredStarX(),layout.pitch())){confirmations.clear();recheck=true;return;}
             // Rows the model is only fairly sure of are read again as text and matched against every factor name
             readings=checkFactorNames(frame,w,h,layout,readings);
             // After the names are checked, so a row the model misread is kept in the card book under its right name.
