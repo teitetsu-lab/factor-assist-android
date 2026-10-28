@@ -86,6 +86,8 @@ final class Store {
         catch (Exception e) { throw new IllegalStateException(e); }
     }
     static String normalize(String s) { return java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFKC).replaceAll("[\\s・･]", "").replace('〇','○'); }
+    /** Letters only, to match a horse's name read on screen against another reading (brackets, dots and stars go). */
+    static String letters(String s){return s==null?"":s.replaceAll("[\\s\\[\\]［］【】「」・･☆★♪♡!！?？.,、。〜~ー-]","");}
     /** Looser key for the factor search box only: hiragana folds to katakana and latin to lower case. */
     static String searchKey(String s) {
         String n=normalize(s);StringBuilder b=new StringBuilder(n.length());

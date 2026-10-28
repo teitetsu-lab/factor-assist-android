@@ -58,6 +58,11 @@ public class CaptureService extends Service {
     /** What the plan says to buy: framed on screen until it is bought or the plan is worked out again. */
     static volatile Set<String> planned=Set.of();
     static boolean skillMode(Context c){return Store.SKILL.equals(Store.prefs(c).getString("mode",Store.FACTOR));}
+    /** 殿堂入りモード: 殿堂入りウマ娘の詳細 is taken (HallOfFame), nothing else is read. */
+    static final String HOF_MODE="hof";
+    static boolean hofMode(Context c){return HOF_MODE.equals(Store.prefs(c).getString("mode",Store.FACTOR));}
+    /** The menu and the result window follow a switch into or out of 殿堂入りモード (see FloatingService). */
+    static volatile Runnable hofSwitched;
     /**
      * The ○ a ◎ row stands for, else null: the row shows ◎ once its ○ is bought, and the ○ read before is dropped
      * from the list (readSkills), so it is owned without a row of its own.
@@ -79,7 +84,8 @@ public class CaptureService extends Service {
     static synchronized void resetResults(String mode){
         resultGeneration++;
         if(Store.SKILL.equals(mode)){skills.clear();skillPlaces.clear();visibleSkills=List.of();planned=Set.of();planRanks=Map.of();planLevels=Map.of();planSpent=null;ownedPt=-1;}
-        else{results.clear();places.clear();}
+        else{results.clear();places.clear();
+        }
     }
     /** Told when the mode switched by itself, to rebuild the menu and say so on screen. */
     static volatile Runnable modeSwitched;
@@ -139,6 +145,8 @@ public class CaptureService extends Service {
         return copy;
     }
     static String summary(Context c){
+        if(hofActive())return hof.summary()+hofLeft();
+        if(hofMode(c))return "殿堂入りモード\n殿堂入りウマ娘の詳細を開くと、スキルと継承のタブを撮りためます";
         if(skillMode(c))return skillSummary(c);
         StringBuilder s=new StringBuilder();var rules=Store.rules(c);for(var entry:snapshot().entrySet()){
         s.append(s.length()>0?"\n":"").append(entry.getKey()).append('\n').append(countSummary(entry.getValue(),rules,Store.detailed(c)));
@@ -283,6 +291,7 @@ public class CaptureService extends Service {
         try{s.worker.submit(()->{}).get(timeoutMs,TimeUnit.MILLISECONDS);}catch(Exception ignored){}
     }
     @Override public void onCreate(){super.onCreate();instance=this;Calibration.current=Calibration.load(this);DrawPlaces.current=DrawPlaces.load(this);captureThread.start();handler=new Handler(captureThread.getLooper());
+        hof.init(this);
     }
     @Override public IBinder onBind(Intent i){return null;}
     @Override public int onStartCommand(Intent intent,int flags,int id){
@@ -304,7 +313,8 @@ public class CaptureService extends Service {
             },handler);
             headerReader=TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
             Rect bounds=getSystemService(WindowManager.class).getMaximumWindowMetrics().getBounds();width=bounds.width();height=bounds.height();
-            openReader();display=projection.createVirtualDisplay("FactorCapture",width,height,getResources().getDisplayMetrics().densityDpi,
+            int[] taken=captureSize(width,height,CAPTURE_ACROSS);
+            openReader();display=projection.createVirtualDisplay("FactorCapture",taken[0],taken[1],getResources().getDisplayMetrics().densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,reader.getSurface(),null,handler);
             stats.reset(SystemClock.elapsedRealtimeNanos());arrivals.reset(SystemClock.elapsedRealtimeNanos());resetStages();connected=true;running=false;paused=true;
             // Reading starts at once, unless the settings say to wait for 開始 on the floating bar (認識開始を押したとき):
@@ -326,15 +336,32 @@ public class CaptureService extends Service {
         if(closed||paused||display==null||lastImageAt>=resumedAt)return;
         Log.d("FactorCapture","再開後に画面が届かないので、受け取り口を作り直す "+width+"x"+height);
         detached=false;display.setSurface(null);releaseHeld();if(reader!=null)reader.close();openReader();
-        display.resize(width,height,getResources().getDisplayMetrics().densityDpi);display.setSurface(reader.getSurface());
+        int[] taken=captureSize(width,height,CAPTURE_ACROSS);
+        display.resize(taken[0],taken[1],getResources().getDisplayMetrics().densityDpi);display.setSurface(reader.getSurface());
     };
     void resize(int w,int h){
-        if(closed||w<=0||h<=0)return;width=w;height=h;Log.d("FactorCapture","共有画面の大きさ："+w+"x"+h+(paused?"（一時停止中）":""));
-        if(display!=null){handler.removeCallbacks(reattach);detached=false;display.setSurface(null);releaseHeld();if(reader!=null)reader.close();openReader();display.resize(w,h,getResources().getDisplayMetrics().densityDpi);if(!paused)display.setSurface(reader.getSurface());}
+        if(closed||w<=0||h<=0)return;width=w;height=h;int[] taken=captureSize(w,h,CAPTURE_ACROSS);
+        Log.d("FactorCapture","共有画面の大きさ："+w+"x"+h+"（受け取り "+taken[0]+"x"+taken[1]+"）"+(paused?"（一時停止中）":""));
+        if(display!=null){handler.removeCallbacks(reattach);detached=false;display.setSurface(null);releaseHeld();if(reader!=null)reader.close();openReader();display.resize(taken[0],taken[1],getResources().getDisplayMetrics().densityDpi);if(!paused)display.setSurface(reader.getSurface());}
+    }
+    /**
+     * The screen is taken at about 720 across (its short side) whatever the phone. The models read crops 16px high,
+     * which a name gives with room to spare at 720 (26px of it, 39px at 1080), and the titles' OCR still gets its
+     * text large enough; every pixel taken beyond that is only more for the phone to scale, copy and read - several
+     * times more on a QHD or 4K screen. The phone shrinks its mirror of the screen to this size. Places across the
+     * screen are shares of the width throughout, and the frames are drawn scaled back to the screen (FactorFrames).
+     */
+    static final int CAPTURE_ACROSS=720;
+    /** w×h shrunk, its shape kept, until its short side is at most across; a screen no bigger is taken as it is. */
+    static int[] captureSize(int w,int h,int across){
+        int shorter=Math.min(w,h);if(shorter<=across)return new int[]{w,h};
+        double scale=across/(double)shorter;
+        return new int[]{w<=h?across:(int)Math.round(w*scale),h<w?across:(int)Math.round(h*scale)};
     }
     void openReader(){
         // One image held by us plus the ones in flight between the display and the listener.
-        reader=ImageReader.newInstance(width,height,PixelFormat.RGBA_8888,3);
+        int[] taken=captureSize(width,height,CAPTURE_ACROSS);
+        reader=ImageReader.newInstance(taken[0],taken[1],PixelFormat.RGBA_8888,3);
         // The display only sends a frame when the screen changes, so a frame that arrives while the worker is busy
         // may be the last one for a long time (the list just stopped scrolling). The newest one is always kept, but
         // only held: it is copied when a cycle starts, so a lower cycle rate also means fewer full-screen copies.
@@ -348,6 +375,7 @@ public class CaptureService extends Service {
             // A frame that is not read now - the worker is busy, or the next read is not due yet under the reads-a-
             // second limit - still moves the frames (see followColumn). So they follow the list at the rate the
             // screen changes, while the full read runs at the rate set.
+            if(hofMode(this))hofFollow(image);else
             if(busy||!readDue())followColumn(image);
             idleDetach();
             pump();
@@ -368,6 +396,7 @@ public class CaptureService extends Service {
     private int[] followBuffer=new int[0];
     void followColumn(Image image){
         FactorFrames.Snapshot last=frames;
+        if(hofMode(this))return;   // 殿堂入り: its frames follow the list there (hofFollow)
         if(last==null||last.marks().isEmpty())return;
         try{
             double scanX=FactorVision.CARD_SCAN_X,top=FactorVision.LIST_TOP,bottom=FactorVision.LIST_BOTTOM;
@@ -496,6 +525,9 @@ public class CaptureService extends Service {
             // The inference mode can be flipped in the display settings while running, for side-by-side timing.
             int threadSetting=Store.prefs(this).getInt("inferenceThreads",0);
             stage(0,grabbed);  // every mode, so a skill cycle's grab is not counted as そのほか
+            // 殿堂入りウマ娘の詳細 is taken whatever the mode, and nothing else reads it (see HallOfFame).
+            if(hof.handle(frame,w,h)){if(!hofMode(this)&&Store.prefs(this).getBoolean("autoMode",true))toMode(HOF_MODE);listSeen();recheck=hof.wantsRecheck();hofRead(frame,w,h);hallOfFameAfter(frame,w,h);return;}
+            if(hofMode(this)){frames=null;leaveHallOfFame(frame,w,h);return;}
             if(skillMode(this)){readSkills(frame,w,h,generation,threadSetting);return;}
             if(vision==null){var set=Modules.readSet(this,"factor.onnx","factor_rank.onnx","labels.json");
                 vision=new FactorVision(set.get("factor.onnx"),set.get("factor_rank.onnx"),new String(set.get("labels.json"),StandardCharsets.UTF_8));activeVision=vision;resetStages();}
@@ -592,8 +624,560 @@ public class CaptureService extends Service {
             if(headerImage!=null&&(pending==null||pending.isComplete()))headerImage.recycle();
             if(++cycles%50==0)Log.d("FactorCapture",arrivalText()+" 処理 "+String.format(Locale.JAPAN,"%.1f",stats.rate(SystemClock.elapsedRealtimeNanos(),5))+" 回/秒 "+stageText().replace('\n',' '));
             handler.post(()->{busy=false;pump();});
+            // Something was taken for the card book while the list had not looked the same long enough: read again
+            // once it may have (a still screen sends no new frame), when no effect can be over it.
+            if(settleWanted){settleWanted=false;handler.postDelayed(()->{recheck=true;pump();},CardBook.SETTLE_MS+5);}
         }
     }
+    /**
+     * In 殿堂入りモード off its screen, nothing is read but whether the factor list or the skill list is up: seen
+     * SWITCH_AFTER frames in a row, the mode switches to it, as factor and skill reading switch between each other.
+     */
+    private int factorSightings,skillSightings;
+    void leaveHallOfFame(Bitmap frame,int w,int h){
+        if(!Store.prefs(this).getBoolean("autoMode",true))return;
+        startCopy(w,h);
+        int fFrom=(int)(h*FactorVision.LIST_TOP),fTo=(int)(h*FactorVision.LIST_BOTTOM),sFrom=(int)(h*SkillVision.COPY_TOP),sTo=(int)(h*SkillVision.COPY_BOTTOM);
+        copyRows(frame,w,fFrom,fTo);copyRows(frame,w,sFrom,sTo);
+        boolean factor=FactorVision.detectCards(pixels,w,h,fFrom,fTo)!=null,skill=SkillVision.fromCards(pixels,w,h,sFrom,sTo)!=null;
+        factorSightings=factor?factorSightings+1:0;skillSightings=skill?skillSightings+1:0;
+        if(factorSightings>=SWITCH_AFTER){factorSightings=0;skillSightings=0;listSeen();toMode(Store.FACTOR);Runnable told=modeSwitched;if(told!=null)told.run();}
+        else if(skillSightings>=SWITCH_AFTER){factorSightings=0;skillSightings=0;listSeen();toMode(Store.SKILL);Runnable told=modeSwitched;if(told!=null)told.run();}
+    }
+    /** Switches the mode by itself, starting its reading afresh. */
+    void toMode(String mode){
+        Store.prefs(this).edit().putString("mode",mode).commit();
+        frames=null;candidate="";stable=0;confirmations.clear();settle.forget();skillHits.clear();skillTop=Integer.MIN_VALUE;sightings=0;
+        if(HOF_MODE.equals(mode)){Runnable told=hofSwitched;if(told!=null)told.run();}
+    }
+    /** 殿堂入りウマ娘の詳細, taken as three long images (see HallOfFame). */
+    static final HallOfFame hof=new HallOfFame();
+    static boolean hofActive(){return hof.active();}
+    /** How many frames in a row the horse on the 殿堂入り screen read as nothing (worker only). */
+    private int blankIdentity;
+    /** Worker: the horse's name for the result window and the files, once; the images saved once all three are whole. */
+    void hallOfFameAfter(Bitmap frame,int w,int h){
+        // Another horse on screen: its epithet and name (right of the portrait) and its evaluation (under it).
+        // Read as nothing before (the screen mid-change, or not this screen after all): tried again, every fifth frame.
+        if(hof.needsIdentity()&&blankIdentity>0&&cycles%5!=0){recheck=true;return;}
+        if(!hof.needsIdentity())blankIdentity=0;
+        // The stats by umacapture's status_value model (StatVision), sure of all five or not taken. A new horse is
+        // noticed on the first frame of its slide in, which is not yet the details screen: on 20 switches the
+        // model had nothing to read 16 times there, though every frame after the slide (about 0.2s) read right.
+        // So the next frames are waited for, and only after STAT_WAITS of them are the stats read as text.
+        int[] byModel=null;
+        if(hof.needsIdentity()){String epithet="",name="",evaluation="",stats="";
+            // The horse and its outfit, from its portrait by umacapture's character model; read as text only
+            // without the model (no downloaded modules) or when it is unsure.
+            CharaVision.Outfit outfit=null;
+            try{CharaVision cv=hofChara();if(cv!=null)outfit=cv.read(frame,w,h);}catch(Exception e){Log.d("FactorCapture","キャラ認識："+e.getClass().getSimpleName());}
+            try{if(outfit!=null){name=outfit.name();epithet=outfit.epithet();}
+                else{Bitmap crop=Bitmap.createBitmap(frame,(int)(.44*w),(int)(380/2340.0*h),(int)(.42*w),(int)(95/2340.0*h));
+                String text=Tasks.await(headerReader.process(InputImage.fromBitmap(crop,0)),2,TimeUnit.SECONDS).getText();crop.recycle();
+                for(String line:text.split("\n")){String l=line.trim();if(l.contains("[")||l.contains("［")||l.contains("]"))epithet=l;else if(l.length()>name.length())name=l;}}
+                Bitmap score=Bitmap.createBitmap(frame,(int)(.09*w),(int)(600/2340.0*h),(int)(.22*w),(int)(55/2340.0*h));
+                evaluation=Tasks.await(headerReader.process(InputImage.fromBitmap(score,0)),2,TimeUnit.SECONDS).getText();score.recycle();
+                // The five stats, each number right of its rank badge: by umacapture's status_value model (StatVision)
+                // when it is sure of all five, else read as text.
+                StringBuilder all=new StringBuilder();
+                if(byModel!=null)for(int k=0;k<5;k++)all.append(k>0?",":"").append(byModel[k]);
+                else for(int k=0;k<5;k++){Bitmap c=Bitmap.createBitmap(frame,(int)((HallOfFame.STAT_NUMBER_LEFT+HallOfFame.STAT_NUMBER_STEP*k)*w),(int)(HallOfFame.STATS_TOP*h),(int)(HallOfFame.STAT_NUMBER_WIDTH*w),(int)((HallOfFame.STATS_BOTTOM-HallOfFame.STATS_TOP)*h));
+                    Bitmap big=Bitmap.createScaledBitmap(c,c.getWidth()*2,c.getHeight()*2,true);c.recycle();
+                    String t=Tasks.await(headerReader.process(InputImage.fromBitmap(big,0)),2,TimeUnit.SECONDS).getText().replaceAll("[^0-9]","");big.recycle();
+                    if(t.length()>4)t=t.substring(t.length()-4);all.append(k>0?",":"").append(t);}
+                stats=all.toString();
+            }catch(Exception ignored){}
+            // Read text varies a little from look to look (真打書之き, 真打·鶴之志 …): set to the outfit it names, so
+            // the same horse always gets the same key.
+            if(name.isEmpty()&&evaluation.isEmpty()){
+                // Not a horse: nothing is kept under an empty key (a folder of nothing was, before).
+                // Three times nothing: given up for this look (a still screen would be read over and over).
+                if(++blankIdentity>=3){blankIdentity=0;hof.unread();return;}
+                if(blankIdentity==1)Log.d("FactorCapture","殿堂入りの子を読めず（名前も評価点も空）：読み直します");recheck=true;return;}
+            blankIdentity=0;
+            hof.identify(epithet,name,evaluation,stats);recheck=true;}
+        // Saved the moment both tabs are whole and every card on them is clean.
+        if(hof.complete()&&!hof.saved()&&compose.ready(this,hof.sessionKey()))saveHallOfFame(true);
+    }
+    /**
+     * Keeps the skill and 継承 images in the gallery, as they were made while taken (HofCompose): each under its tab's
+     * top, taken while its list was scrolled. auto: said as done by itself.
+     */
+    void saveHallOfFame(boolean auto){
+        // Saved already, or nothing taken of this horse: saving again would write its record over with no images,
+        // factors or lists (the parts are cleared once saved), and that cannot be undone.
+        if(hof.saved()){if(!auto)new Handler(Looper.getMainLooper()).post(()->Ui.toast(this,"この子は保存済みです"));return;}
+        String key=hof.sessionKey();
+        if(!compose.has(key,0)&&!compose.has(key,1)){new Handler(Looper.getMainLooper()).post(()->Ui.toast(this,"保存できる画像がありません"));return;}
+        List<byte[]> images=new ArrayList<>();int n=0;List<String> uris=new ArrayList<>();
+        for(int tab=0;tab<2;tab++){byte[] png=null;
+            try{Bitmap head=hof.headBitmap(tab);if(head!=null)try{png=compose.finish(this,key,tab,head);}finally{head.recycle();}}
+            catch(Exception e){Log.d("FactorCapture","殿堂入りの組み立てに失敗："+e.getClass().getSimpleName());}
+            images.add(png);}
+        List<HallOfFame.Factor> factors=compose.factors(key);
+        // One folder a horse, its images in it, under its character and epithet (HallOfFame.folder).
+        String folder=hof.folder(new java.text.SimpleDateFormat("yyyyMMdd_HHmm",Locale.JAPAN).format(new java.util.Date()));
+        try{for(int i=0;i<images.size();i++){if(images.get(i)==null){uris.add("");continue;}
+            uris.add(String.valueOf(Ui.saveImage(this,folder,(i+1)+"_"+HallOfFame.TABS[i]+".webp",images.get(i))));n++;}}
+        catch(Exception e){Log.d("FactorCapture","殿堂入りの保存に失敗："+e.getClass().getSimpleName());}
+        Log.d("FactorCapture","殿堂入りの因子 "+factors.size()+"件："+factors);
+        // Made but not one put in the gallery (storage full…): not marked saved, so it can be saved again.
+        boolean made=false;for(byte[] png:images)if(png!=null)made=true;
+        if(made&&n==0){new Handler(Looper.getMainLooper()).post(()->Ui.toast(this,"ギャラリーへの保存に失敗しました（空き容量を確認して、もう一度保存してください）"));return;}
+        hof.markSaved(images,uris,factors);
+        // The lists, kept with the horse: its images can be made again from them (remakeHallOfFame).
+        try{java.io.File dir=hof.dir();if(dir!=null)java.nio.file.Files.write(new java.io.File(dir,"layout.json").toPath(),compose.save().toString().getBytes(StandardCharsets.UTF_8));}
+        catch(Exception e){Log.d("FactorCapture","殿堂入りの並びを残せず："+e.getClass().getSimpleName());}
+        // Its name set right now that it is saved: its folder, images and lists move with it (HallOfFame.fixNames).
+        HallOfFameActivity.saved();
+        // Saved: the card book keeps, of each part, only the takes that made it clean.
+        CardBook.prune(this,compose.parts(key));compose.clear();
+        String said=n==0?"保存できる画像がありません":(auto?"そろったので、":"")+n+"枚をギャラリーの「Pictures/因子アシスト/"+folder+"」に保存しました";
+        new Handler(Looper.getMainLooper()).post(()->Ui.toast(this,said));
+    }
+    /** What the images still lack, for the result window: the cards (and headings, icons) not taken clean yet. */
+    static String hofLeft(){
+        // Without waiting on the images being made (HofCompose.remainingByTabNow): this runs on the main thread.
+        if(hof.saved())return "";int[] n=compose.remainingByTabNow(hof.sessionKey());if(n==null||n[0]+n[1]==0)return "";
+        return "\nあと"+(n[0]+n[1])+"枚（スキル"+n[0]+"・継承"+n[1]+"）　枠が出ているところで止めてください";
+    }
+    private CharaVision charaVision;private boolean charaMissing;
+    /** umacapture's character model, from the downloaded modules; null without them. */
+    CharaVision hofChara(){
+        if(charaVision==null&&!charaMissing)
+            try{var set=Modules.readSet(this,"character.onnx","labels.json");charaVision=new CharaVision(set.get("character.onnx"),new String(set.get("labels.json"),StandardCharsets.UTF_8));}
+            catch(Exception e){charaMissing=true;Log.d("FactorCapture","キャラ認識のモデルがありません："+e.getClass().getSimpleName());}
+        return charaVision;
+    }
+    /** This cycle's list has looked the same for CardBook.SETTLE_MS (listSettled); when the last frame came. */
+    private volatile boolean frameSettled;private volatile long frameArrivedMs;
+    private int[] listLook;private long listSameSince;
+    /**
+     * Whether the list (that part of the frame) has looked the same, frame to frame, for CardBook.SETTLE_MS: nothing
+     * on it moved, so no effect is over its cards. Only the list counts - the rest of the screen (the horse, the
+     * background) moves all the time. Every other pixel each way, as brightness; a shade or two of difference is the same.
+     */
+    boolean listSettled(Bitmap frame,int left,int top,int right,int bottom){
+        int w=right-left;if(w<=0||bottom<=top)return false;int[] row=new int[w];int[] look=new int[((w+1)/2)*((bottom-top+1)/2)];int n=0;
+        for(int y=top;y<bottom;y+=2){frame.getPixels(row,0,w,left,y,w,1);for(int x=0;x<w;x+=2)look[n++]=lum(row[x]);}
+        long now=SystemClock.elapsedRealtime();boolean same=listLook!=null&&listLook.length==look.length;
+        for(int i=0;same&&i<look.length;i++)if(Math.abs(look[i]-listLook[i])>4)same=false;
+        if(!same){listLook=look;listSameSince=now;return false;}
+        return now-listSameSince>=CardBook.SETTLE_MS;
+    }
+    /** Something was taken off a frame not settled yet: it is to be read again once it has. */
+    private volatile boolean settleWanted;
+    /**
+     * A horse's images made again (HallOfFameActivity): from its lists and its tabs' tops, kept when it was saved, and
+     * the card book as it is now - put in place of the images in the gallery (and of the copies kept with the record).
+     * What it says, for the screen.
+     */
+    static String remakeHallOfFame(Context c,java.io.File dir){
+        try{
+            java.io.File layout=new java.io.File(dir,"layout.json");if(!layout.exists())return "この子は並びが残っていないので、作り直せません（撮り直してください）";
+            org.json.JSONObject meta=HallOfFame.readMeta(dir);if(meta==null)return "この子の記録が読めないので、作り直せません";
+            String key=meta.optString("key");List<String> uris=HallOfFame.strings(meta.optJSONArray("uris"));
+            HofCompose made=HofCompose.restore(key,new org.json.JSONObject(new String(java.nio.file.Files.readAllBytes(layout.toPath()),StandardCharsets.UTF_8)));
+            int done=0,left=0;
+            try{for(int tab=0;tab<HallOfFame.TAKEN;tab++){
+                java.io.File headFile=HallOfFame.head(dir,tab);if(headFile==null)continue;
+                Bitmap head=android.graphics.BitmapFactory.decodeFile(headFile.getPath());if(head==null)continue;
+                byte[] png;try{png=made.finish(c,key,tab,head);}finally{head.recycle();}
+                if(png==null)continue;
+                // The gallery's image replaced by the new one, as WebP (one saved as PNG before goes; the new one takes its name and folder).
+                if(tab<uris.size()&&!uris.get(tab).isEmpty()){uris.set(tab,String.valueOf(replaceInGallery(c,android.net.Uri.parse(uris.get(tab)),png)));meta.put("uris",new org.json.JSONArray(uris));}
+                java.io.File old=HallOfFame.saved(dir,tab);if(old!=null&&old.getName().endsWith(".png"))old.delete();
+                java.nio.file.Files.write(new java.io.File(dir,"saved"+tab+".webp").toPath(),png);
+                done++;}
+                left=Math.max(0,made.remaining(key));
+                synchronized(HallOfFame.META_LOCK){org.json.JSONObject now=HallOfFame.readMeta(dir);if(now!=null){now.put("uris",meta.optJSONArray("uris"));HallOfFame.writeMeta(dir,now);}}
+                // What the images are made of now, for カードを確認.
+                java.nio.file.Files.write(layout.toPath(),made.save().toString().getBytes(StandardCharsets.UTF_8));}
+            finally{made.clear();}
+            if(done==0)return "作り直せる画像がありません（撮り直してください）";
+            return done+"枚を作り直しました"+(left>0?"（綺麗なカードがまだ無いところが"+left+"か所あります）":"");
+        }catch(Exception e){return "作り直せませんでした："+e.getClass().getSimpleName();}
+    }
+    /**
+     * A gallery image put in place of uri: in its folder, under its name as .webp. A WebP one is written over; one
+     * saved before (PNG) is deleted and a new one inserted. The image's uri now.
+     */
+    static android.net.Uri replaceInGallery(Context c,android.net.Uri uri,byte[] webp)throws Exception{
+        var resolver=c.getContentResolver();String name=null,path=null,type=null;
+        try(var q=resolver.query(uri,new String[]{android.provider.MediaStore.Images.Media.DISPLAY_NAME,android.provider.MediaStore.Images.Media.RELATIVE_PATH,android.provider.MediaStore.Images.Media.MIME_TYPE},null,null,null)){
+            if(q!=null&&q.moveToFirst()){name=q.getString(0);path=q.getString(1);type=q.getString(2);}}
+        if(name==null){return Ui.saveImage(c,"殿堂入り","作り直し_"+System.currentTimeMillis()+".webp",webp);}
+        if("image/webp".equals(type)){try(var out=resolver.openOutputStream(uri,"wt")){if(out!=null)out.write(webp);}return uri;}
+        String base=name.replaceAll("\\.[^.]+$","");String sub=path==null?"":path.replaceFirst("^"+android.os.Environment.DIRECTORY_PICTURES+"/因子アシスト/?","").replaceAll("/$","");
+        resolver.delete(uri,null,null);
+        return Ui.saveImage(c,sub,base+".webp",webp);
+    }
+    /** The 殿堂入り images as they are made (see HofCompose). */
+    static final HofCompose compose=new HofCompose();
+    /** This horse taken again from nothing. */
+    /** On the worker, after the cycle in hand: one begun before would write its tab's progress into the new one. */
+    static void retakeHallOfFame(){Runnable r=()->{hof.retake();compose.clear();};CaptureService s=instance;if(s!=null&&!s.closed)s.onWorker(r);else r.run();}
+    /** How long the list must stand still before its cards are taken for the card book, and again while it stays (ms). */
+    /**
+     * Taken for the card book on every frame read while the list stands still - as fast as the reading is set - and
+     * a part is clean once two takes agree: tap effects move all the time they are there, so two frames alike have
+     * none over them (and when no new frame comes at all, nothing on the screen is moving).
+     */
+    static final long HOF_STILL_MS=1;
+    /**
+     * Worker only. The 殿堂入り screen's skill and 継承 lists, read as the other modes read theirs: every frame read
+     * (at the rate set) on a tab begun (HallOfFame.place), its cards and other things read once (hofSeen) and that one
+     * reading used for everything -
+     * - the list and the images being made (HofCompose: laid over the list by the names, voted on, drawn once clean;
+     *   how far down the list has come, the scroll bar's - HallOfFame.reached);
+     * - the frames: black where a thing is not read yet, red where the card book has nothing of it, yellow while it
+     *   has only takes that may have an effect over them, none once clean - placed for this frame and moved with
+     *   the list between reads (hofFollow);
+     * - the card book: on every frame on which the scroll bar stands where it stood on the frame before, what was read
+     *   as what it was voted to be is taken (see HOF_STILL_MS).
+     */
+    void hofRead(Bitmap frame,int w,int h){
+        HallOfFame.Place pl=hof.place();
+        if(pl==null){frames=null;return;}
+        compose.begin(hof.sessionKey());
+        int x0=(int)(HallOfFame.LEFT*w),y0=(int)(HallOfFame.LIST_TOP*h),y1=(int)(HallOfFame.LIST_BOTTOM*h);Bitmap list=null;
+        List<HofCompose.Look> looks;
+        try{list=Bitmap.createBitmap(frame,x0,y0,(int)(HallOfFame.RIGHT*w)-x0,y1-y0);
+            HofCompose.Result res=compose.onSeen(this,pl.tab(),list,hofSeen(list,pl.tab()));looks=res.looks();
+            if(res.joined())hof.reached(pl);
+            boolean left=false;for(HofCompose.Look l:looks)if(l.state()!=CardBook.CLEAN)left=true;
+            frameSettled=listSettled(list,0,0,list.getWidth(),list.getHeight());
+            if(left&&pl.stillMs()>=HOF_STILL_MS){
+                List<CardBook.Shown> take=new ArrayList<>();for(HofCompose.Look l:looks)if(l.agrees()&&l.state()!=CardBook.CLEAN)take.add(l.seen().shown());
+                // Each frame taken once; one not settled yet is read again once it has (no effect over it then).
+                if(!take.isEmpty()){CardBook.collect(this,list,take,cycleFrameTime,frameSettled);if(!frameSettled)settleWanted=true;}}
+            // Just stopped: the same frame read again, now as still, to be taken.
+            if(left&&pl.stillMs()<HOF_STILL_MS)recheck=true;
+        }catch(Exception e){Log.d("FactorCapture","殿堂入りの読み取り："+e.getClass().getSimpleName());frames=null;return;}
+        finally{if(list!=null)list.recycle();}
+        // Placed for this frame, then moved by how far the list has gone on since (hofFollow): drawn as they are,
+        // they would jump back to where the list was.
+        int since=hofMovedSince(cycleFrameTime);
+        List<FactorFrames.Mark> marks=new ArrayList<>();
+        for(HofCompose.Look l:looks){if(l.state()==CardBook.CLEAN)continue;
+            var r=l.seen().card();int[] box={x0+r.left,y0+r.top-since,x0+r.right,y0+r.bottom-since};
+            if(box[1]<y0||box[3]>y1)continue;
+            int colour=l.state()==HofCompose.UNREAD?FactorFrames.PLAIN:l.state()==CardBook.NONE?0:2;
+            marks.add(new FactorFrames.Mark((box[1]+box[3])/2,colour,true,null,box));}
+        frames=marks.isEmpty()?null:new FactorFrames.Snapshot(w,h,marks,0,0);
+    }
+    /**
+     * The skill tab's cards, for the card book: two columns of cards, each known by its text (name, and Lv for the
+     * unique skill). Shares of the image's width from the S25 (1052 wide): cards 28-516 and 531-1018, 89 tall, the
+     * name starting 77 in.
+     */
+    /** The factor and skill models for the 殿堂入り screen's cards, loaded as the factor and skill modes load them. */
+    FactorVision hofFactorVision()throws Exception{
+        if(vision==null){var set=Modules.readSet(this,"factor.onnx","factor_rank.onnx","labels.json");
+            vision=new FactorVision(set.get("factor.onnx"),set.get("factor_rank.onnx"),new String(set.get("labels.json"),StandardCharsets.UTF_8));activeVision=vision;resetStages();}
+        return vision;
+    }
+    SkillVision hofSkillVision()throws Exception{
+        if(skillVision==null){var set=Modules.readSet(this,"skill.onnx","labels.json");
+            skillVision=new SkillVision(set.get("skill.onnx"),new String(set.get("labels.json"),StandardCharsets.UTF_8),Store.prefs(this).getInt("inferenceThreads",0));}
+        return skillVision;
+    }
+    /** The pixels of box in image, and the crop of them the models take (outWidth wide). */
+    private record Cut(int[] pixels,int width,int height,byte[] crop) {}
+    private static Cut cut(Bitmap image,int left,int top,int right,int bottom,int outWidth){
+        if(left<0||top<0||right>image.getWidth()||bottom>image.getHeight()||right<=left||bottom<=top)return null;
+        int bw=right-left,bh=bottom-top;int[] px=new int[bw*bh];image.getPixels(px,0,bw,left,top,bw,bh);
+        byte[] crop=FactorVision.crop(px,bw,bh,0,0,bw,bh,outWidth,false);return crop==null?null:new Cut(px,bw,bh,crop);
+    }
+    /**
+     * The skill tab's cards, found as the factor and skill modes find theirs: down a line through each column's cards
+     * (x 500 and 1000 of 1052 on the S25), where a card is a run off the grey background (242) 89 tall; the columns'
+     * cards are 26-518 and 529-1021 across. Each card's name is then where umacapture's skill_tab puts it, a fixed
+     * place from the card's top (98-496 and 600-998 across, 30-60 down), and read by the skill model; a card the
+     * model is unsure of is seen without a name, to be read on another screen. Kept of each in the card book: its
+     * icon and name (a skill's icon is always the same) - a strip from just before the icon to short of the level -
+     * and the blank card of its kind with that strip painted over; a horse's own unique skill (its rainbow card, with
+     * its level) whole, for this horse only.
+     */
+    List<HofCompose.Seen> skillSeen(Bitmap image,int from)throws Exception{
+        int w=image.getWidth(),h=image.getHeight();double u=w/1052.0;
+        int[] left={(int)(26*u),(int)(529*u)},scan={(int)(500*u),(int)(1000*u)},nameLeft={(int)(98*u),(int)(600*u)};
+        int cardW=(int)(492*u),nameW=(int)(398*u);
+        List<int[]> cards=new ArrayList<>();List<Cut> cuts=new ArrayList<>();
+        for(int col=0;col<2;col++)for(int[] run:cardRuns(image,scan[col],from,h,(int)(80*u),(int)(100*u))){
+            if(run[0]+(int)(89*u)>h)continue;
+            Cut c=cut(image,nameLeft[col],run[0]+(int)(30*u),nameLeft[col]+nameW,run[0]+(int)(60*u),SkillVision.NAME_WIDTH);
+            if(c!=null){cards.add(new int[]{col,run[0]});cuts.add(c);}
+        }
+        List<HofCompose.Seen> out=new ArrayList<>();if(cuts.isEmpty())return out;
+        SkillVision sv=hofSkillVision();List<byte[]> crops=new ArrayList<>();for(Cut c:cuts)crops.add(c.crop());
+        var named=sv.names(crops);
+        for(int i=0;i<cards.size();i++){
+            int col=cards.get(i)[0],l=left[col],top=cards.get(i)[1];
+            var box=new android.graphics.Rect(l,top,l+cardW,top+(int)(89*u));
+            String name=null;CardBook.Shown shown=null;
+            if(named.get(i).confidence()>=SkillVision.NAME_MIN){Cut c=cuts.get(i);
+                name=sv.ringChecked(c.pixels(),c.width(),c.height(),new int[]{0,0,c.width(),c.height()},named.get(i).name());
+                String kind=cardKind(image,l,top,u);
+                if(kind.equals("rainbow"))shown=new CardBook.Shown(box,List.of(new CardBook.Card("sr|"+name+"|"+hof.sessionKey(),box)));
+                else shown=skillShown(image,box,u,name,kind);
+            }
+            out.add(new HofCompose.Seen(col,box,name,0,shown));
+        }
+        return out;
+    }
+    /**
+     * The factor names of chips (HallOfFame.chips), read by the factor model from where umacapture's factor_tab puts
+     * a chip's name: 148 left to 186 right of its column's middle, 46 to 16 over its stars (S25, 1052 wide). Null
+     * where the model is unsure.
+     */
+    List<String> chipNames(Bitmap image,List<int[]> chips)throws Exception{
+        int w=image.getWidth();double u=w/1052.0;String[] out=new String[chips.size()];
+        List<byte[]> crops=new ArrayList<>();List<Integer> at=new ArrayList<>();
+        for(int i=0;i<chips.size();i++){int[] c=chips.get(i);int cx=(int)Math.round(HallOfFame.FACTOR_COLUMNS[c[0]]*w);
+            Cut cut=cut(image,cx-(int)(148*u),c[1]-(int)(46*u),cx+(int)(186*u),c[1]-(int)(16*u),168);
+            if(cut!=null){crops.add(cut.crop());at.add(i);}}
+        if(!crops.isEmpty()){FactorVision fv=hofFactorVision();fv.runner.begin();
+            try{var r=fv.runner.infer(FactorVision.NAME_MODEL,crops);
+                for(int j=0;j<crops.size();j++)if(r.confidence()[j]>=FactorVision.NAME_MIN)out[at.get(j)]=fv.labels.getString((int)r.indices()[j]);}
+            finally{fv.runner.end();}}
+        return Arrays.asList(out);
+    }
+    /**
+     * A skill card's kind, by its colour in the margin over its name (150 and 440 in, 12 down): white (most, and
+     * inherited ones), pink, gold, or the rainbow of a horse's own unique skill. The same skill comes in more than one
+     * (an inherited unique is white, or pink), so the kind is part of what a card is.
+     */
+    static String cardKind(Bitmap image,int left,int top,double u){
+        int y=Math.min(image.getHeight()-1,top+(int)(12*u));
+        int a=image.getPixel(left+(int)(150*u),y),b=image.getPixel(left+(int)(440*u),y);
+        int ar=(a>>16)&255,ag=(a>>8)&255,ab=a&255,br=(b>>16)&255,bb=b&255;
+        if(ag>ar+30&&ab>ar+30&&br>bb)return "rainbow";      // light blue on the left, pink on the right
+        if(ar>=245&&ab>ag&&ag<230)return "pink";
+        if(ar>=245&&ag>ab+40)return "gold";
+        return "white";
+    }
+    /** Runs down column x (from..to) off the grey background, min..max tall: {top, bottom}. */
+    static List<int[]> cardRuns(Bitmap image,int x,int from,int to,int min,int max){
+        List<int[]> out=new ArrayList<>();int start=-1;
+        int[] col=new int[Math.max(0,to-from)];image.getPixels(col,0,1,x,from,1,to-from);
+        for(int i=0;i<=col.length;i++){
+            boolean on=i<col.length&&Math.abs(((col[i]>>16)&255)-242)+Math.abs(((col[i]>>8)&255)-242)+Math.abs((col[i]&255)-242)>=15;
+            if(on&&start<0)start=i;
+            if(!on&&start>=0){if(i-start>=min&&i-start<=max)out.add(new int[]{from+start,from+i});start=-1;}
+        }
+        return out;
+    }
+    /**
+     * A factor chip as the card book keeps it, in two parts: its name - a strip of the chip from just before the name
+     * to its end, the same whatever the stars - and its stars, which only differ by the chip's colour and how many
+     * are gold, so a name is collected once and the stars few times. Chip: 406 wide about its column, from 63 over
+     * its stars to 20 under (the stars' points and shadow reach 18); the name 50-14 over them, the three stars 56 either side (S25, 1052 wide).
+     */
+    static CardBook.Shown factorShown(Bitmap image,int[] chip,String name,String kind){
+        int w=image.getWidth();double u=w/1052.0;int cx=(int)Math.round(HallOfFame.FACTOR_COLUMNS[chip[0]]*w),y=chip[1];
+        var stars=new android.graphics.Rect(cx-(int)(56*u),y-(int)(14*u),cx+(int)(56*u),y+(int)(20*u));
+        var chipBox=new android.graphics.Rect(cx-(int)(206*u),y-(int)(63*u),cx+(int)(206*u),y+(int)(20*u));
+        int l=cx-(int)(150*u),t=chipBox.top+(int)(16*u),b=chipBox.top+(int)(50*u);
+        int[] span=CardBook.letters(image,l,t,chipBox.right-(int)(6*u),b,chipBox.top+(int)(10*u));if(span==null)return null;
+        var letters=new android.graphics.Rect(l,t,span[0]+(int)(6*u),b);int fillEnd=span[1]+(int)(8*u);
+        var fill=new android.graphics.Rect(l,t,fillEnd,b);
+        // Over the ball and the letters only: the stars hang under them.
+        var blank=new CardBook.Blank((int)(10*u),-1);
+        return new CardBook.Shown(chipBox,List.of(new CardBook.Card("fc|"+kind,chipBox,List.of(fill,stars),blank),new CardBook.Card("ft|"+name,letters),new CardBook.Card("fs|"+kind+"|"+chip[2],stars)));
+    }
+    /**
+     * A skill card (not a rainbow one) as the card book keeps it: the common card of its kind - one card taken, its
+     * icon and letters filled in with its own colour - its icon (8-65 across, 12-79 down on the S25; a skill's icon is
+     * always the same), and its letters (from 79 across, 31-56 down), as wide as they are. Row 8, over the icon, has
+     * nothing on it on a card of any colour. Null where no letters are found.
+     */
+    static CardBook.Shown skillShown(Bitmap image,android.graphics.Rect box,double u,String name,String kind){
+        int l=box.left,top=box.top;
+        int tl=l+(int)(74*u),tt=top+(int)(26*u),tb=top+(int)(62*u);
+        int[] span=CardBook.letters(image,tl,tt,l+(int)(470*u),tb,top+(int)(8*u));if(span==null)return null;
+        var icon=new android.graphics.Rect(l+(int)(5*u),top+(int)(8*u),l+(int)(70*u),top+(int)(82*u));
+        var letters=new android.graphics.Rect(tl,tt,span[0]+(int)(6*u),tb);int fillEnd=span[1]+(int)(8*u);
+        var fill=new android.graphics.Rect(tl-(int)(2*u),tt,fillEnd,tb);
+        // Over the icon and the letters (under them is the card's edge): the card's colour runs the same down it.
+        var blank=new CardBook.Blank((int)(8*u),-1);
+        return new CardBook.Shown(box,List.of(new CardBook.Card("sc|"+kind,box,List.of(icon,fill),blank),new CardBook.Card("si|"+name,icon),new CardBook.Card("st|"+kind+"|"+name,letters)));
+    }
+    private static Map<String,String> chipKinds;private static FactorCatalog chipKindsOf;
+    /**
+     * A factor chip's colour, by what kind of factor it is (umacapture's factor_info, as the factor list has it):
+     * blue the stats (青因子), pink the aptitudes (赤因子), green a unique skill's, white every other - not by the colour
+     * on screen, which a frame caught mid effect can get wrong.
+     */
+    static synchronized String chipKind(Context context,String name){
+        FactorCatalog catalog=Ui.catalog(context);
+        if(chipKinds==null||chipKindsOf!=catalog){Map<String,String> kinds=new HashMap<>();chipKindsOf=catalog;
+            for(FactorCatalog.Factor f:catalog.factors){String c=f.category();
+                kinds.put(f.name(),c.equals("青因子")?"blue":c.equals("赤因子")?"pink":c.equals("固有スキル因子")?"green":"white");}
+            chipKinds=kinds;}
+        return chipKinds.getOrDefault(name,"white");
+    }
+    /** The cards wholly on the list as the screen shows it (tab 0 skills, 1 factors), named or not. */
+    List<HofCompose.Seen> hofSeen(Bitmap list,int tab)throws Exception{
+        if(tab==0)return skillSeen(list,0);
+        int h=list.getHeight(),w=list.getWidth();double u=w/1052.0;
+        List<int[]> chips=HallOfFame.chips(list,0);List<String> names=chipNames(list,chips);List<HofCompose.Seen> out=new ArrayList<>();
+        for(int i=0;i<chips.size();i++){int[] c=chips.get(i);int cx=(int)Math.round(HallOfFame.FACTOR_COLUMNS[c[0]]*w);
+            var box=new android.graphics.Rect(cx-(int)(206*u),c[1]-(int)(63*u),cx+(int)(206*u),c[1]+(int)(20*u));
+            if(box.top<0||box.bottom>h)continue;
+            out.add(new HofCompose.Seen(c[0],box,names.get(i),c[2],names.get(i)==null?null:factorShown(list,c,names.get(i),chipKind(this,names.get(i)))));}
+        out.addAll(decorSeen(list,out));
+        return out;
+    }
+    private static int lum(int p){return (((p>>16)&255)*3+((p>>8)&255)*6+(p&255))/10;}
+    /**
+     * The 継承 tab's things besides its chips, on the list as the screen shows it (S25, 1052 wide):
+     * - the 因子 banner: green across the list (down x 120 and x 500 both), 30-48 tall; taken 36 tall from its top;
+     * - a 継承元 heading: its rule, a faint grey line across 2-8 tall, found down x 300, 600 and 900 together, with the
+     *   heading's dark letters at 84-161 beside it; the heading is taken 16 over the rule to 18 under it;
+     * - a horse's icon: a run of colour left of the chips (x 50-170) at least 80 tall (gaps of up to 8 rows in it -
+     *   the face's white - do not end it), taken by the chip row beside its top: 30 over it to 150 under, to x 190;
+     *   each horse's icon is its own, so it is known by the horse and the chips beside its top.
+     * The banner and the headings look the same on every horse, and are kept in the card book like the cards.
+     */
+    List<HofCompose.Seen> decorSeen(Bitmap list,List<HofCompose.Seen> chips){
+        int w=list.getWidth(),h=list.getHeight();double u=w/1052.0;List<HofCompose.Seen> out=new ArrayList<>();
+        // The banner is green across (33-1012): down x 120 (past its 因子, left of every chip) as well as x 500 - a
+        // green chip (a unique skill's), with its name across it, makes runs as short at x 500 alone.
+        int[] at500=new int[h],at30=new int[h];list.getPixels(at500,0,1,(int)(500*u),0,1,h);list.getPixels(at30,0,1,(int)(120*u),0,1,h);
+        java.util.function.IntPredicate greenAt=p->((p>>8)&255)>((p>>16)&255)+40&&((p>>8)&255)>(p&255)+40;
+        int bannerTop=-1,bannerEnd=-1;
+        for(int y=0,start=-1;y<=h;y++){
+            boolean green=y<h&&greenAt.test(at500[y])&&greenAt.test(at30[y]);
+            if(green&&start<0)start=y;
+            if(!green&&start>=0){int len=y-start;
+                if(len>=30*u&&len<=48*u&&start>0&&y<h){bannerTop=start;bannerEnd=y;var box=new android.graphics.Rect(0,start,w,start+(int)(36*u));
+                    out.add(new HofCompose.Seen(2,box,"因子",0,new CardBook.Shown(box,List.of(new CardBook.Card("hb|因子",box)))));}
+                start=-1;}
+        }
+        int[][] cols=new int[3][h];int[] xs={(int)(300*u),(int)(600*u),(int)(900*u)};
+        for(int k=0;k<3;k++)list.getPixels(cols[k],0,1,xs[k],0,1,h);
+        java.util.function.IntPredicate faint=y->{for(int[] c:cols){int d=242-lum(c[y]);if(d<2||d>25)return false;}return true;};
+        java.util.function.IntPredicate bg=y->{for(int[] c:cols)if(Math.abs(242-lum(c[y]))>=2)return false;return true;};
+        for(int y=2;y<h-2;y++){
+            if(!faint.test(y)||!bg.test(y-1))continue;
+            int start=y;while(y<h&&faint.test(y))y++;int len=y-start;
+            if(len<2||len>8||y>=h||!bg.test(y))continue;
+            boolean letters=false;
+            for(int yy=Math.max(0,start-(int)(12*u));yy<Math.min(h,start+(int)(14*u))&&!letters;yy++)
+                for(int x=(int)(84*u);x<(int)(161*u);x+=2){int p=list.getPixel(x,yy);if(((p>>16)&255)+((p>>8)&255)+(p&255)<450){letters=true;break;}}
+            if(!letters)continue;
+            var box=new android.graphics.Rect(0,start-(int)(16*u),w,start+(int)(18*u));if(box.top<0||box.bottom>h)continue;
+            out.add(new HofCompose.Seen(2,box,"継承元",0,new CardBook.Shown(box,List.of(new CardBook.Card("hd|継承元",box)))));
+        }
+        int x0=(int)(50*u),x1=(int)(170*u),gap=(int)(8*u);int[] row=new int[x1-x0];
+        for(int y=0,start=-1,last=-1;y<=h;y++){
+            boolean colour=false;
+            if(y<h&&!(y>=bannerTop&&y<bannerEnd)){list.getPixels(row,0,row.length,x0,y,row.length,1);
+                for(int i=0;i<row.length;i+=3){int p=row[i],mx=Math.max((p>>16)&255,Math.max((p>>8)&255,p&255)),mn=Math.min((p>>16)&255,Math.min((p>>8)&255,p&255));if(mx-mn>60){colour=true;break;}}}
+            if(colour){if(start<0)start=y;last=y;continue;}
+            if(start>=0&&(y-last>gap||y==h)){int end=last+1;
+                if(end-start>=80*u&&start>10*u&&end<h-10*u){
+                    // Placed by the chip row beside its top, always the same way (its colour's run is a few rows
+                    // longer or shorter frame to frame): from 30 over that row to 150 under.
+                    List<HofCompose.Seen> beside=new ArrayList<>();
+                    for(HofCompose.Seen c:chips)if(c.col()<2&&c.card().top>=start-40*u&&c.card().top<=start+70*u)beside.add(c);
+                    if(beside.isEmpty()){start=-1;continue;}
+                    int first=beside.get(0).card().top;for(HofCompose.Seen c:beside)first=Math.min(first,c.card().top);
+                    final int rowTop=first;beside.removeIf(c->c.card().top>rowTop+20*u);
+                    var box=new android.graphics.Rect(0,rowTop-(int)(30*u),(int)(190*u),rowTop+(int)(150*u));
+                    if(box.top<0||box.bottom>h){start=-1;continue;}
+                    beside.sort(Comparator.comparingInt(HofCompose.Seen::col));
+                    StringBuilder key=new StringBuilder("hi|").append(hof.sessionKey());boolean named=!beside.isEmpty();
+                    for(HofCompose.Seen c:beside){if(c.name()==null)named=false;key.append('|').append(c.name()).append(c.stars());}
+                    out.add(new HofCompose.Seen(2,box,"icon",0,named?new CardBook.Shown(box,List.of(new CardBook.Card(key.toString(),box))):null));
+                }
+                start=-1;}
+        }
+        return out;
+    }
+    // ---- 殿堂入り: the frames moved at the rate the screen changes (capture thread), as followColumn does elsewhere
+
+    private int[] hofProfile;private int hofThumb=-1,hofTotal;
+    private final long[] hofTimes=new long[128];private final int[] hofTotals=new int[128];private int hofCount;
+    /** A row's brightness, summed over 16 points across the list: what the list's moves are found by, frame to frame. */
+    static final int HOF_POINTS=16;
+    /** Off by more than this (summed brightness, per row): the list moved further than could be followed. */
+    static final int HOF_LOST=HOF_POINTS*10*14;
+    /**
+     * Capture thread only. How far the list moved since the last frame: its rows' brightness (one number a row)
+     * matched against the last frame's, near the move the scroll bar's thumb gives (the bar alone is off by a card's
+     * part; the rows are what is exact, and near it they cannot be taken for the card above or below). The frames
+     * drawn move by it; a move that matches nowhere takes them off until the worker places them again.
+     */
+    void hofFollow(Image image){
+        try{
+            int w=image.getWidth(),h=image.getHeight();
+            var plane=image.getPlanes()[0];var buffer=plane.getBuffer();int rs=plane.getRowStride(),ps=plane.getPixelStride();
+            int y0=(int)(HallOfFame.LIST_TOP*h),y1=(int)(HallOfFame.LIST_BOTTOM*h),rows=y1-y0;
+            int xl=(int)(HallOfFame.LEFT*w)+40,xr=(int)(HallOfFame.RIGHT*w)-60;
+            int[] p=new int[rows];
+            for(int r=0;r<rows;r++){int sum=0,base=(y0+r)*rs;
+                for(int k=0;k<HOF_POINTS;k++){int i=base+(xl+(xr-xl)*k/(HOF_POINTS-1))*ps;sum+=(buffer.get(i)&255)*3+(buffer.get(i+1)&255)*6+(buffer.get(i+2)&255);}
+                p[r]=sum;}
+            int bx=(int)(HallOfFame.BAR_X*w),tt=(int)(HallOfFame.TRACK_TOP*h),tb=(int)(HallOfFame.TRACK_BOTTOM*h),top=-1,end=-1;
+            for(int y=tt-4;y<tb+4;y++){int i=y*rs+bx*ps,r=buffer.get(i)&255,g=buffer.get(i+1)&255,b=buffer.get(i+2)&255;
+                if(Math.abs(r-137)<16&&Math.abs(g-135)<16&&Math.abs(b-153)<16){if(top<0)top=y;end=y+1;}}
+            int thumb=top>=0&&end-top>=10?top:-1,length=end-top;
+            int[] prev=hofProfile;int prevThumb=hofThumb;hofProfile=p;hofThumb=thumb;
+            int shift=0;
+            if(prev!=null&&prev.length==rows){
+                int est=0,track=tb-tt;
+                if(thumb>=0&&prevThumb>=0&&track>length){int content=(int)((long)rows*track/length);est=(int)Math.round((thumb-prevThumb)*(double)(content-rows)/(track-length));}
+                long best=Long.MAX_VALUE;int at=est;
+                for(int s=est-30;s<=est+30;s++){if(Math.abs(s)>rows-200)continue;
+                    int r0=Math.max(0,-s),r1=Math.min(rows,rows-s);long sum=0;int n=0;
+                    for(int r=r0;r<r1;r+=2){sum+=Math.abs(p[r]-prev[r+s]);n++;}
+                    long mean=n==0?Long.MAX_VALUE:sum/n;if(mean<best){best=mean;at=s;}}
+                if(best>HOF_LOST){FactorFrames.Snapshot last=frames;if(last!=null)frames=null;}
+                else shift=at;
+            }
+            synchronized(hofTimes){hofTotal+=shift;int k=hofCount++%hofTimes.length;hofTimes[k]=image.getTimestamp();hofTotals[k]=hofTotal;}
+            FactorFrames.Snapshot last=frames;
+            if(last!=null&&shift!=0){
+                List<FactorFrames.Mark> moved=new ArrayList<>();
+                for(var m:last.marks()){int[] b=m.box();if(b==null)continue;int[] nb={b[0],b[1]-shift,b[2],b[3]-shift};
+                    if(nb[1]<y0||nb[3]>y1)continue;
+                    moved.add(new FactorFrames.Mark(m.y()-shift,m.priority(),m.met(),m.label(),nb,m.top(),m.tag(),m.rank(),m.price(),m.side()));}
+                frames=moved.isEmpty()?null:new FactorFrames.Snapshot(last.frameWidth(),last.frameHeight(),moved,last.rowHalf(),last.labelX());
+            }
+        }catch(Exception ignored){}
+    }
+    /** How far the list has moved (hofFollow) since the frame captured at time: 0 when that frame is not on record. */
+    int hofMovedSince(long time){
+        synchronized(hofTimes){
+            int n=Math.min(hofCount,hofTimes.length);
+            for(int i=0;i<n;i++){int k=(hofCount-1-i)%hofTimes.length;if(hofTimes[k]<=time)return hofTotal-hofTotals[k];}
+            return 0;
+        }
+    }
+    /** Every factor name, normalised to itself, from the model's labels (read even when the factor model is not loaded). */
+    Map<String,String> allFactorNames(){
+        Map<String,String> names=factorNames();if(names!=null&&!names.isEmpty())return names;
+        Map<String,String> out=new HashMap<>();
+        try{var labels=new org.json.JSONObject(new String(Modules.read(this,"labels.json"),StandardCharsets.UTF_8)).getJSONArray("factor.name");
+            for(int i=0;i<labels.length();i++){String n=labels.optString(i);if(!n.isEmpty())out.put(Store.normalize(n),n);}}catch(Exception ignored){}
+        return out;
+    }
+    /** The factor a line read as text names: the same once normalised, else the nearest by edits (a fifth of its length at most). */
+    static String closestName(String raw,Map<String,String> names){
+        String t=Store.normalize(raw.replaceAll("^[○◯●〇・\\s]+","").trim());if(t.isEmpty())return null;
+        String exact=names.get(t);if(exact!=null)return exact;
+        String best=null;int bestD=Integer.MAX_VALUE;
+        for(var e:names.entrySet()){String k=e.getKey();if(Math.abs(k.length()-t.length())>2)continue;int d=edits(k,t);if(d<bestD){bestD=d;best=e.getValue();}}
+        return bestD<=Math.max(1,t.length()/5)?best:null;
+    }
+    static int edits(String a,String b){
+        int[] prev=new int[b.length()+1],cur=new int[b.length()+1];for(int j=0;j<=b.length();j++)prev[j]=j;
+        for(int i=1;i<=a.length();i++){cur[0]=i;for(int j=1;j<=b.length();j++)cur[j]=Math.min(Math.min(cur[j-1]+1,prev[j]+1),prev[j-1]+(a.charAt(i-1)==b.charAt(j-1)?0:1));int[] t=prev;prev=cur;cur=t;}
+        return prev[b.length()];
+    }
+    static void saveHallOfFameNow(){CaptureService s=instance;if(s!=null)s.onWorker(()->s.saveHallOfFame(false));}
     /** Every factor name the model can output, normalised to itself: the dictionary text readings are matched against. */
     private Map<String,String> factorNames;private FactorVision namesOf;
     Map<String,String> factorNames(){
@@ -711,9 +1295,6 @@ public class CaptureService extends Service {
             frames=null;skillHits.clear();visibleSkills=List.of();message="スキル画面を探しています";return;
         }
         showContent();
-        // Reading the prices costs an OCR pass per row, and while the list scrolls every crop is new, so the
-        // cache never helps and the frames fall a cycle or two behind. Prices only change when a skill is bought,
-        // which happens on a still screen, so they are read then and kept while scrolling.
         int top=layout.ys().get(0);
         boolean moving=skillTop!=Integer.MIN_VALUE&&Math.abs(top-skillTop)>2;
         skillTop=top;
@@ -769,8 +1350,8 @@ public class CaptureService extends Service {
             int[] box=SkillVision.ptBox(layout.iconRight(),layout.pitch(),row.y());
             boolean owned=SkillVision.acquired(pixels,w,h,box);
             int pt=owned?0:-1;
-            // While the list scrolls prices are not read, but a skill read before keeps its price: the rate under
-            // it stays up instead of vanishing until the list stops.
+            // While the list scrolls only the digit templates read prices; one they are unsure of keeps the price
+            // read before, so the rate under it stays up instead of vanishing until the list stops.
             int shownPt=pt;
             if(pt<0)synchronized(CaptureService.class){Skill known=skills.get(row.name());if(known!=null&&known.pt()>0)shownPt=known.pt();}
             // Before a plan exists, a green frame on every row that was read says how far the reading got.

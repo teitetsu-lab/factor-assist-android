@@ -78,6 +78,8 @@ public class MainActivity extends Activity {
         // The six things done here.
         GridLayout tiles=new GridLayout(this);tiles.setColumnCount(2);content.addView(tiles,new LinearLayout.LayoutParams(-1,-2));
         List<android.view.View> all=new ArrayList<>();
+        // The horses kept, and running them over a チャンミ: first, as used most.
+        all.add(Ui.tile(this,android.R.drawable.ic_menu_gallery,"殿堂入りウマ娘","保存した子を因子で探す",()->startActivity(new Intent(this,HallOfFameActivity.class))));
         all.addAll(List.of(
             Ui.tile(this,android.R.drawable.ic_menu_edit,"プリセットを編集","登録する因子と優先度",()->Ui.edit(this,false,this::render)),
             Ui.tile(this,android.R.drawable.ic_input_add,"新規プリセット","空のプリセットを作る",()->Ui.newPreset(this,false,this::render)),

@@ -12,6 +12,7 @@
         </activity>
         <activity android:name=".SettingsActivity" android:exported="false" android:label="設定" />
         <activity android:name=".CalibrationActivity" android:exported="false" android:label="読み取り位置の調整" />
+        <activity android:name=".HallOfFameActivity" android:exported="false" android:label="殿堂入りウマ娘" />
         <service android:name=".FloatingService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-controlled floating factor recognition controls over a game, with preset editing and stop controls"/>
         </service>

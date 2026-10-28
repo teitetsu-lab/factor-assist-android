@@ -499,5 +499,8 @@ final class SkillVision implements AutoCloseable {
         if(!FactorVision.inside(box,width,height))return null;
         return FactorVision.crop(pixels,width,height,box[0],box[1],box[2],box[3],NAME_WIDTH,false);
     }
+    record Named(String name,float confidence) {}
+    /** The names in crops already cut (殿堂入り's cards, placed from each card's own edges). */
+    List<Named> names(List<byte[]> crops)throws Exception{List<Named> out=new ArrayList<>();if(crops.isEmpty())return out;runner.begin();try{var r=runner.infer(0,crops);for(int i=0;i<crops.size();i++)out.add(new Named(labels.getString((int)r.indices()[i]),r.confidence()[i]));}finally{runner.end();}return out;}
     @Override public void close(){runner.close();}
 }

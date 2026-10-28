@@ -192,13 +192,15 @@ public class FloatingService extends Service {
     void buildMenu(){if(destroyed||lostOverlay())return;Ui.palette(this);if(menuScroll!=null){bar.removeView(menuScroll);menuScroll=null;}rebuildBar();if(!expanded)return;menu=Ui.column(this);menu.setBackgroundColor(Color.TRANSPARENT);menu.setPadding(Ui.dp(this,12),Ui.dp(this,12),Ui.dp(this,12),Ui.dp(this,4));
         // The two kinds of preset are listed separately: in skill support only skill presets make sense.
         boolean skillMode=CaptureService.skillMode(this);
-        boolean factorMode=!skillMode;
+        boolean hofMode=CaptureService.hofMode(this);
+        boolean factorMode=!skillMode&&!hofMode;
         String kind=Store.FACTOR;
         // Full width, or the weighted buttons inside collapse to nothing and the row cannot be tapped.
         LinearLayout modes=new LinearLayout(this);modes.setBackground(Ui.rounded(this,Ui.SURFACE,22));modes.setPadding(Ui.dp(this,4),Ui.dp(this,4),Ui.dp(this,4),Ui.dp(this,4));
         menu.addView(modes,new LinearLayout.LayoutParams(-1,-2));
         modes.addView(modeButton("因子",Store.FACTOR,factorMode),new LinearLayout.LayoutParams(0,Ui.dp(this,38),1));
         modes.addView(modeButton("スキル",Store.SKILL,skillMode),new LinearLayout.LayoutParams(0,Ui.dp(this,38),1));
+        modes.addView(modeButton("殿堂入り",CaptureService.HOF_MODE,hofMode),new LinearLayout.LayoutParams(0,Ui.dp(this,38),1));
         JSONArray all=new JSONArray();JSONArray stored=Store.all(this);
         for(int i=0;i<stored.length();i++)if(Store.kindOf(stored.optJSONObject(i)).equals(kind))all.put(stored.optJSONObject(i));
         String[] names=new String[all.length()];int selected=0;JSONObject current=Store.selected(this,kind);
@@ -231,8 +233,15 @@ public class FloatingService extends Service {
         // The menu itself covers the rows, and these settings change what is drawn over them, so it folds away
         // first: the small settings window is then the only thing between the user and the game.
         java.util.List<View> tiles=new java.util.ArrayList<>();
+        // 殿堂入りモード: the horses kept, and what the gestures do too, as buttons.
+        if(hofMode){
+            tiles.add(menuTile(android.R.drawable.ic_menu_gallery,"保存した子を見る",false,()->{expanded=false;buildMenu();
+                startActivity(new Intent(this,HallOfFameActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));}));
+            tiles.add(menuTile(android.R.drawable.ic_menu_save,"今の分で保存",false,CaptureService::saveHallOfFameNow));
+            tiles.add(menuTile(android.R.drawable.ic_menu_revert,"撮り直す",false,()->{CaptureService.retakeHallOfFame();Ui.toast(this,"殿堂入りウマ娘を最初から撮り直します");updateSummary(true);}));
+        }
         tiles.add(menuTile(android.R.drawable.ic_menu_preferences,"表示設定",false,()->{expanded=false;buildMenu();settings();}));
-        tiles.add(menuTile(android.R.drawable.ic_menu_revert,skillMode?"読み取りリセット":"結果をリセット",false,this::resetCurrent));
+        if(!hofMode)tiles.add(menuTile(android.R.drawable.ic_menu_revert,skillMode?"読み取りリセット":"結果をリセット",false,this::resetCurrent));
         // What is used now and then goes under その他, so the menu stays short over the game.
         java.util.List<String> extras=new java.util.ArrayList<>();java.util.List<Runnable> actions=new java.util.ArrayList<>();
         extras.add("1つ前の結果を呼び出す");actions.add(this::restorePrevious);
@@ -257,8 +266,10 @@ public class FloatingService extends Service {
      * gesture can mean "reset" whether factors or skills are being read.
      */
     static final String[] GESTURES={"none","details","reset","toggle","menu"
+        ,"hofRetake","hofSave"
     };
     static final String[] GESTURE_NAMES={"何もしない","詳細を開く","読み取りをリセット","認識の開始／停止","メニューを開く"
+        ,"殿堂入りを撮り直す","殿堂入りを今の分で保存"
     };
     static final String[] GESTURE_KEYS={"gestureTap","gestureDouble","gestureLong"};
     static final String[] GESTURE_LABELS={"タップ","2回タップ","長押し"};
@@ -267,8 +278,12 @@ public class FloatingService extends Service {
     static final String[] SKILL_DEFAULTS={"details","reset","none"};
     static String gestureKey(String mode,int which){return GESTURE_KEYS[which]+"_"+mode;}
     static String gestureDefault(String mode,int which){
+        if(HOF.equals(mode))return HOF_DEFAULTS[which];
         return (Store.SKILL.equals(mode)?SKILL_DEFAULTS:FACTOR_DEFAULTS)[which];
     }
+    /** While 殿堂入りウマ娘の詳細 is being taken (or its images wait to be sent), the gestures are its own. */
+    static final String HOF="hof";
+    static final String[] HOF_DEFAULTS={"none","hofRetake","hofSave"};
 
     /** How long the long press counts down before it acts. */
     static final int HOLD_SECONDS=3;
@@ -276,6 +291,7 @@ public class FloatingService extends Service {
     String holdNotice;
     String gestureAction(int which){
         String mode=CaptureService.skillMode(this)?Store.SKILL:Store.FACTOR;
+        if(CaptureService.hofActive()||CaptureService.hofMode(this))mode=HOF;
         return Store.prefs(this).getString(gestureKey(mode,which),gestureDefault(mode,which));
     }
     /** What a gesture does, for the countdown; null when it does nothing. */
@@ -290,6 +306,8 @@ public class FloatingService extends Service {
             case "reset" -> {resetCurrent();Ui.toast(this,"リセットしました");}
             case "toggle" -> {if(CaptureService.running)CaptureService.pause(this);else if(CaptureService.connected)CaptureService.resume(this);}
             case "menu" -> {expanded=!expanded;buildMenu();}
+            case "hofRetake" -> {CaptureService.retakeHallOfFame();Ui.toast(this,"殿堂入りウマ娘を最初から撮り直します");updateSummary(true);}
+            case "hofSave" -> CaptureService.saveHallOfFameNow();
             default -> {}
         }
     }
@@ -310,7 +328,7 @@ public class FloatingService extends Service {
         // The results of both modes stay: switching only changes which one is read and shown.
         Store.prefs(this).edit().putString("mode",mode).commit();
         buildMenu();refreshSummary();refreshFrames();
-        bubble(Store.SKILL.equals(mode)?"スキルモード":"因子モード");
+        bubble(Store.SKILL.equals(mode)?"スキルモード":CaptureService.HOF_MODE.equals(mode)?"殿堂入りモード":"因子モード");
     }
     /** The bubble on screen now, so a quick second switch replaces it rather than stacking another. */
     private TextView bubble;
@@ -652,6 +670,7 @@ public class FloatingService extends Service {
         boolean nothingYet=Store.prefs(this).getBoolean("autoMode",true)&&!CaptureService.hasResults(CaptureService.skillMode(this)?Store.SKILL:Store.FACTOR);
         // 殿堂入り: shown while its screen is up (or its images wait to be sent); in its mode otherwise, like the others
         // with the mode switching by itself, nothing until there is something to show.
+        if(CaptureService.hofActive())nothingYet=false;else if(CaptureService.hofMode(this))nothingYet=Store.prefs(this).getBoolean("autoMode",true);
         String text=holdNotice!=null?holdNotice:nothingYet?"":CaptureService.summary(this);if(!text.equals(shownSummary)){shownSummary=text;summary.setText(frameColored(text));}
         summary.setVisibility(text.isEmpty()?View.GONE:View.VISIBLE);if(text.isEmpty())return;
         Rect bounds=wm.getCurrentWindowMetrics().getBounds();
@@ -842,6 +861,7 @@ public class FloatingService extends Service {
         // Only the mode being used is shown: the other one's settings are noise while adjusting this one.
         boolean skill=CaptureService.skillMode(this);
         gestureGroup(content,skill?"スキルモード":"因子モード",skill?Store.SKILL:Store.FACTOR);
+        gestureGroup(content,"殿堂入りウマ娘の保存中",HOF);
         TextView note=new TextView(this);note.setTextSize(12);
         note.setText("結果のフローティング表示に対する操作です。2回タップを使うと、1回タップの反応が0.4秒ほど遅れます。長押しは"+HOLD_SECONDS+"秒のカウントダウンが0になるまで押し続けると実行され、途中で離すと中止します。");
         content.addView(note);
